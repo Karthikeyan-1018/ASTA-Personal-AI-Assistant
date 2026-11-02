@@ -1,0 +1,42 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+backend/venv/
+
+# IDE
+.vscode/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+
+# Local databases
+*.db
+*.sqlite3
+
+# Local model files
+models/
+*.gguf
+*.safetensors
+
+# Local data and generated files
+data/raw/
+data/processed/
+data/embeddings/
