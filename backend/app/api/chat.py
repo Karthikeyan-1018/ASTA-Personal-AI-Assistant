@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -10,6 +9,7 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
 class ChatRequest(BaseModel):
     message: str
+    private: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -23,7 +23,8 @@ async def chat(request: ChatRequest):
 
     try:
         result = await chat_service.get_response(
-            request.message
+            prompt=request.message,
+            private=request.private
         )
 
         return result
@@ -37,5 +38,5 @@ async def chat(request: ChatRequest):
     except Exception as error:
         raise HTTPException(
             status_code=503,
-            detail="AI service is currently unavailable"
+            detail=str(error)
         ) from error

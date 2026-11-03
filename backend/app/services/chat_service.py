@@ -1,26 +1,23 @@
-
-from app.llm.ollama_provider import ollama_provider
+from app.llm.llm_router import llm_router
 
 
 class ChatService:
 
-    async def get_response(self, prompt: str) -> dict:
-        """
-        Generate an AI response using the Ollama provider.
-        """
+    async def get_response(
+        self,
+        prompt: str,
+        private: bool = False
+    ) -> dict:
 
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
-        response = await ollama_provider.generate_response(
-            prompt.strip()
+        result = await llm_router.generate_response(
+            prompt=prompt.strip(),
+            private=private
         )
 
-        return {
-            "provider": "ollama",
-            "model": "qwen3:8b",
-            "response": response
-        }
+        return result
 
 
 # Create a reusable service instance

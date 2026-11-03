@@ -40,3 +40,4 @@ models/
 data/raw/
 data/processed/
 data/embeddings/
+.env
