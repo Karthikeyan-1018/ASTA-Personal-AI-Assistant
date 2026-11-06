@@ -9,23 +9,18 @@ async def main():
     )
 
     try:
-        print("Connecting to Ollama...")
+        print("Checking Ollama health...")
 
-        response = await client.chat(
-            model="qwen3:8b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Explain AI in one sentence."
-                }
-            ]
-        )
+        result = await client.list()
 
-        print("\nOllama connection successful!")
-        print(response.message.content)
+        print("\nOllama health check successful!")
+        print("Installed models:")
+
+        for model in result.models:
+            print(model.model)
 
     except Exception as error:
-        print("\nConnection failed!")
+        print("\nHealth check failed!")
         print(repr(error))
 
     finally:

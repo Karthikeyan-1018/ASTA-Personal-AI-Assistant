@@ -37,7 +37,15 @@ class Settings:
     OLLAMA_NUM_CTX: int = int(
         os.getenv("OLLAMA_NUM_CTX", "4096")
     )
+    
+    # Provider timeout configuration (seconds)
+    GROQ_TIMEOUT_SECONDS: int = int(
+        os.getenv("GROQ_TIMEOUT_SECONDS", "30")
+    )
 
+    OLLAMA_TIMEOUT_SECONDS: int = int(
+        os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")
+    )
 
 # Create a shared settings object
 settings = Settings()
