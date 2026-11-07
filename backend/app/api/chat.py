@@ -1,9 +1,12 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import get_optional_user_id
+from app.database.connection import get_db
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
@@ -31,7 +34,11 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    user_id: int | None = Depends(get_optional_user_id),
+    session: AsyncSession = Depends(get_db)
+):
 
     # Reject empty or whitespace-only prompts.
     if not request.message or not request.message.strip():
@@ -45,7 +52,9 @@ async def chat(request: ChatRequest):
 
         result = await chat_service.get_response(
             prompt=request.message,
-            private=request.private
+            private=request.private,
+            user_id=user_id,
+            session=session
         )
 
         return result

@@ -37,7 +37,7 @@ class Settings:
     OLLAMA_NUM_CTX: int = int(
         os.getenv("OLLAMA_NUM_CTX", "4096")
     )
-    
+
     # Provider timeout configuration (seconds)
     GROQ_TIMEOUT_SECONDS: int = int(
         os.getenv("GROQ_TIMEOUT_SECONDS", "30")
@@ -46,6 +46,13 @@ class Settings:
     OLLAMA_TIMEOUT_SECONDS: int = int(
         os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")
     )
+
+    # PostgreSQL database configuration
+    DB_HOST: str = os.getenv("DB_HOST", "127.0.0.1")
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME: str = os.getenv("DB_NAME", "asta_db")
+    DB_USER: str = os.getenv("DB_USER", "postgres")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 
 # Create a shared settings object
 settings = Settings()

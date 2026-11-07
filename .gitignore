@@ -31,8 +31,8 @@ build/
 *.db
 *.sqlite3
 
-# Local model files
-models/
+# Local model files (repository root only, not app/models)
+/models/
 *.gguf
 *.safetensors
 
@@ -40,4 +40,3 @@ models/
 data/raw/
 data/processed/
 data/embeddings/
-.env
