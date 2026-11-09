@@ -3,8 +3,8 @@
 import re
 from collections.abc import Iterable
 
+from app.core.secret_patterns import SECRET_PATTERNS
 from app.memory.memory_retriever import RetrievedMemory
-from app.services.memory_service import SECRET_PATTERNS
 
 
 MAX_CONTEXT_MEMORIES = 5

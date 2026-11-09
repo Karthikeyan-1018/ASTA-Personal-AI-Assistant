@@ -13,7 +13,9 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
+from app.core.config import settings
 from app.database.base import Base
 
 if TYPE_CHECKING:
@@ -78,6 +80,24 @@ class Memory(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False
+    )
+
+    # Semantic index data. The vector is nullable so existing memories and
+    # memories awaiting backfill remain valid. New values are written only
+    # after a successful embedding generation.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(settings.EMBEDDING_DIMENSION),
+        nullable=True
+    )
+
+    embedding_model: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True
+    )
+
+    embedding_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
     )
 
     user: Mapped["User"] = relationship(back_populates="memories")

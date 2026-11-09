@@ -12,3 +12,19 @@ class MemoryValidationError(MemoryServiceError):
 
 class MemoryExtractionError(MemoryServiceError):
     """Raised when the LLM returns an unusable memory extraction result."""
+
+
+class EmbeddingServiceError(MemoryServiceError):
+    """Base exception for memory embedding failures."""
+
+
+class EmbeddingValidationError(EmbeddingServiceError):
+    """Raised when embedding input or an embedding vector is invalid."""
+
+
+class EmbeddingModelError(EmbeddingServiceError):
+    """Raised when the embedding model cannot be loaded or used."""
+
+
+class SemanticRetrievalUnavailable(MemoryServiceError):
+    """Raised when semantic retrieval cannot run for the current database."""

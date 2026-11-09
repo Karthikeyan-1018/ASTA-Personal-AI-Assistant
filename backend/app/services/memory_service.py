@@ -1,14 +1,16 @@
 import logging
-import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.secret_patterns import SECRET_PATTERNS
 from app.exceptions.memory_exceptions import (
     MemoryNotFoundError,
     MemoryValidationError,
 )
+from app.memory.semantic_support import is_semantic_storage_available
 from app.models.memory import Memory, MemoryStatus
+from app.services.memory_embedding_service import memory_embedding_service
 
 
 logger = logging.getLogger(__name__)
@@ -19,18 +21,8 @@ MAX_CATEGORY_LENGTH = 50
 DEFAULT_CATEGORY = "general"
 
 
-# Conservative patterns for values that look like credentials. Memory
-# content matching these patterns is rejected instead of being stored.
-SECRET_PATTERNS = (
-    re.compile(r"\b(?:sk|gsk|pk|rk)[-_][A-Za-z0-9_-]{8,}\b"),
-    re.compile(
-        r"(?i)\b(?:api[_-]?key|password|passwd|secret|token|"
-        r"access[_-]?token|auth[_-]?token)\s*[:=]\s*\S+"
-    ),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9\-._~+/]{8,}=*"),
-)
+# ``SECRET_PATTERNS`` is re-exported for backwards compatibility. Its single
+# definition lives in ``app.core.secret_patterns``.
 
 
 def _validate_content(content: str) -> str:
@@ -196,6 +188,13 @@ class MemoryService:
             )
             raise
 
+        if content is not None:
+            await self._refresh_embedding_if_enabled(
+                session=session,
+                memory=memory,
+                force=True
+            )
+
         return memory
 
     async def delete_memory(
@@ -231,12 +230,20 @@ class MemoryService:
         memory_id: int
     ) -> Memory:
 
-        return await self._set_status(
+        memory = await self._set_status(
             session=session,
             user_id=user_id,
             memory_id=memory_id,
             status=MemoryStatus.APPROVED
         )
+
+        await self._refresh_embedding_if_enabled(
+            session=session,
+            memory=memory,
+            force=True
+        )
+
+        return memory
 
     async def reject_memory(
         self,
@@ -245,12 +252,59 @@ class MemoryService:
         memory_id: int
     ) -> Memory:
 
-        return await self._set_status(
+        memory = await self._set_status(
             session=session,
             user_id=user_id,
             memory_id=memory_id,
             status=MemoryStatus.REJECTED
         )
+
+        try:
+            await memory_embedding_service.clear_embedding(
+                session=session,
+                memory=memory
+            )
+
+        except Exception:
+            # The status change is already committed. A stale vector cannot
+            # be returned because semantic retrieval filters on status.
+            logger.warning(
+                "Could not clear the embedding for rejected memory %s.",
+                memory.id
+            )
+
+        return memory
+
+    async def _refresh_embedding_if_enabled(
+        self,
+        session: AsyncSession,
+        memory: Memory,
+        force: bool = False
+    ) -> None:
+        """Refresh semantic index data when pgvector storage is available."""
+
+        if memory.status != MemoryStatus.APPROVED:
+            return
+
+        if not await is_semantic_storage_available(session):
+            return
+
+        try:
+            await memory_embedding_service.ensure_embedding(
+                session=session,
+                memory=memory,
+                force=force
+            )
+
+        except Exception:
+            # Approval and updates should still succeed when the embedding
+            # model is temporarily unavailable. The missing embedding is
+            # visible to the backfill command and semantic retrieval falls
+            # back to keyword retrieval.
+            logger.warning(
+                "Memory %s is not currently indexed for semantic retrieval.",
+                memory.id
+            )
 
     async def _set_status(
         self,

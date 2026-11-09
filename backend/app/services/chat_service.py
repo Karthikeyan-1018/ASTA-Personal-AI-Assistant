@@ -2,6 +2,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.llm.llm_router import llm_router
 from app.memory.context_builder import build_chat_prompt
 from app.memory.memory_retriever import memory_retriever
@@ -34,12 +35,25 @@ class ChatService:
         if user_id is not None and session is not None:
 
             try:
-                memories = await memory_retriever.retrieve(
-                    session=session,
-                    user_id=user_id,
-                    query=cleaned_prompt,
-                    limit=memory_limit
-                )
+                if settings.SEMANTIC_RETRIEVAL_ENABLED:
+                    memories = await memory_retriever.retrieve(
+                        session=session,
+                        user_id=user_id,
+                        query=cleaned_prompt,
+                        limit=memory_limit,
+                        mode="semantic",
+                        similarity_threshold=(
+                            settings.SEMANTIC_SIMILARITY_THRESHOLD
+                        ),
+                        allow_keyword_fallback=True
+                    )
+                else:
+                    memories = await memory_retriever.retrieve(
+                        session=session,
+                        user_id=user_id,
+                        query=cleaned_prompt,
+                        limit=memory_limit
+                    )
 
             except Exception:
                 # Chat should remain available if memory retrieval fails.

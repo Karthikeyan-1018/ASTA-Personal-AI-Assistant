@@ -54,5 +54,32 @@ class Settings:
     DB_USER: str = os.getenv("DB_USER", "postgres")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 
+    # Semantic memory configuration
+    EMBEDDING_MODEL_NAME: str = os.getenv(
+        "EMBEDDING_MODEL_NAME",
+        "intfloat/multilingual-e5-base"
+    )
+
+    EMBEDDING_DIMENSION: int = int(
+        os.getenv("EMBEDDING_DIMENSION", "768")
+    )
+
+    EMBEDDING_DEVICE: str = os.getenv(
+        "EMBEDDING_DEVICE",
+        "cpu"
+    )
+
+    EMBEDDING_BATCH_SIZE: int = int(
+        os.getenv("EMBEDDING_BATCH_SIZE", "16")
+    )
+
+    SEMANTIC_SIMILARITY_THRESHOLD: float = float(
+        os.getenv("SEMANTIC_SIMILARITY_THRESHOLD", "0.75")
+    )
+
+    SEMANTIC_RETRIEVAL_ENABLED: bool = (
+        os.getenv("SEMANTIC_RETRIEVAL_ENABLED", "true").lower() == "true"
+    )
+
 # Create a shared settings object
 settings = Settings()

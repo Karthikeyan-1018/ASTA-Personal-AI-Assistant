@@ -6,6 +6,7 @@ import re
 
 from pydantic import ValidationError
 
+from app.core.secret_patterns import SECRET_PATTERNS
 from app.exceptions.memory_exceptions import (
     MemoryExtractionError,
     MemoryValidationError,
@@ -15,7 +16,6 @@ from app.schemas.memory_extraction import (
     ExtractedMemoryCandidate,
     MemoryExtractionLLMResponse,
 )
-from app.services.memory_service import SECRET_PATTERNS
 
 
 logger = logging.getLogger(__name__)

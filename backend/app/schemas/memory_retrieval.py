@@ -1,5 +1,7 @@
 """Pydantic schemas for context-aware memory retrieval."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -32,6 +34,8 @@ class MemoryRetrievalRequest(BaseModel):
         ge=1,
         le=50
     )
+
+    mode: Literal["keyword", "semantic"] = "keyword"
 
     @field_validator("category")
     @classmethod

@@ -11,9 +11,11 @@ from app.exceptions.llm_exceptions import (
     LLMUnavailableError,
 )
 from app.exceptions.memory_exceptions import (
+    EmbeddingServiceError,
     MemoryExtractionError,
     MemoryNotFoundError,
     MemoryValidationError,
+    SemanticRetrievalUnavailable,
 )
 from app.memory.memory_extractor import memory_extractor
 from app.memory.memory_retriever import memory_retriever
@@ -201,7 +203,8 @@ async def retrieve_memories(
             user_id=user_id,
             query=payload.query,
             category=payload.category,
-            limit=payload.limit
+            limit=payload.limit,
+            mode=payload.mode
         )
 
         memories = [
@@ -227,6 +230,26 @@ async def retrieve_memories(
         raise HTTPException(
             status_code=400,
             detail=str(error)
+        ) from error
+
+    except SemanticRetrievalUnavailable as error:
+        logger.warning(
+            "Semantic memory retrieval is unavailable."
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic memory retrieval is currently unavailable."
+        ) from error
+
+    except EmbeddingServiceError as error:
+        logger.warning(
+            "Memory embedding generation failed during retrieval."
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Semantic memory retrieval is currently unavailable."
         ) from error
 
     except Exception as error:
