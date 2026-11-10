@@ -135,6 +135,7 @@ class ChatService:
                         role=MessageRole.ASSISTANT,
                         content=task_result.get("response") or "",
                         provider=task_result.get("provider"),
+                        model=task_result.get("model"),
                         is_private=private,
                     )
 
@@ -214,6 +215,7 @@ class ChatService:
                     role=MessageRole.ASSISTANT,
                     content=result.get("response") or "",
                     provider=result.get("provider"),
+                    model=result.get("model"),
                     is_private=private
                 )
 

@@ -66,10 +66,15 @@ class Message(Base):
         nullable=False
     )
 
-    # Response metadata. The provider is recorded for assistant messages so
-    # a conversation can be audited without storing any credentials.
+    # Response metadata. The provider and model are recorded for assistant
+    # messages so a conversation can be audited without storing credentials.
     provider: Mapped[str | None] = mapped_column(
         String(50),
+        nullable=True
+    )
+
+    model: Mapped[str | None] = mapped_column(
+        String(100),
         nullable=True
     )
 

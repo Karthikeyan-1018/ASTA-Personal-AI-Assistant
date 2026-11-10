@@ -42,7 +42,7 @@ Source-separated, escaped prompt
 LLMRouter (Groq first / Ollama fallback; private -> Ollama only)
     |
     v
-Persist assistant message -> API response
+Persist assistant message (provider, model) -> API response
 ```
 
 ## Context providers
@@ -80,7 +80,8 @@ Adding a source means implementing `retrieve()` and adding the provider to
 5. Retrieve approved long-term memories with semantic mode and keyword fallback.
 6. Build the unified prompt through `UnifiedContextBuilder.build()`.
 7. Call `LLMRouter.generate_response(prompt, private=...)`.
-8. Persist the assistant message and add `conversation_id` to the response.
+8. Persist the assistant message with its `provider` and `model` and add
+   `conversation_id` to the response.
 
 Unauthenticated requests stay context-free. When no context section is present
 the rendered prompt is exactly the trimmed user message.
@@ -188,6 +189,9 @@ sources produce no section at all.
 - Secret-bearing memories, preferences and history messages are filtered before
   rendering.
 - No context provider logs retrieved content.
+- SQL echo is opt-in via `DB_ECHO` (default `false`) and no longer follows
+  `DEBUG`, so bound parameters such as prompts and memory content are not logged
+  by default.
 
 ## Failure handling
 
@@ -199,6 +203,9 @@ sources produce no section at all.
   context.
 - LLM routing failures remain visible to the API as 503/504 responses; context
   failures are deliberately not allowed to break chat.
+- A blank, whitespace-only, or non-string provider answer is treated as a
+  provider failure. Groq blank output falls back to Ollama; a blank Ollama answer
+  returns 503. An empty assistant message is never returned or persisted.
 - Validation errors (empty prompt, invalid conversation id, invalid task fields)
   are not swallowed.
 

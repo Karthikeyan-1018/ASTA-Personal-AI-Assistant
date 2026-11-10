@@ -179,3 +179,10 @@ cd backend
 cd backend
 ..\venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+Real-PostgreSQL integration checks (Phase 7E, `asta_db` only) run separately:
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe scripts\verify_phase7e_integration.py
+```

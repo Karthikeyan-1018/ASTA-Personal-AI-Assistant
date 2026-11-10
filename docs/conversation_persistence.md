@@ -33,17 +33,20 @@ reported as `404 Conversation not found.`, so no ownership information leaks.
 Both blocks are delimited and treated as untrusted data. The current user
 message is always emitted separately and last.
 
-## Schema change
+## Schema changes
 
 Migration `f3a1c9d7e5b2` (`add_message_metadata`) adds two non-destructive
-columns to `messages`:
+columns to `messages`, and migration `e4b7c2d9f1a3`
+(`add_message_model_metadata`) adds the response model name:
 
 | Column | Type | Rules |
 | --- | --- | --- |
 | `provider` | `varchar(50)` | Nullable. Assistant response provider. |
+| `model` | `varchar(100)` | Nullable. Assistant response model. |
 | `is_private` | `boolean` | Not null, server default `false`. |
 
-No credentials, API keys, or provider secrets are stored.
+Both metadata columns are nullable, so existing rows remain valid and no data is
+rewritten. No credentials, API keys, or provider secrets are stored.
 
 ## Chat flow
 
@@ -53,13 +56,16 @@ No credentials, API keys, or provider secrets are stored.
 4. Retrieve approved long-term memories separately.
 5. Build the prompt with memory and history blocks.
 6. Call the hybrid LLM router.
-7. Save the assistant message with provider metadata only after a successful
-   response.
+7. Save the assistant message with `provider` and `model` metadata only after a
+   successful response.
 8. Return the answer and `conversation_id`.
 
 If the LLM fails, the user message stays persisted and no assistant message is
 written. A private message is never included in a later non-private prompt, so
 private content is not sent to Groq through history.
+
+Deterministic task-intent replies do not call an LLM; they are persisted with
+`provider="task_engine"` and `model="deterministic"`.
 
 ## Configuration
 
@@ -143,6 +149,7 @@ Messages are always returned in chronological order (`created_at`, then `id`).
       "role": "user",
       "content": "Hello",
       "provider": null,
+      "model": null,
       "is_private": false,
       "created_at": "2026-11-09T12:00:01+00:00"
     }
@@ -202,7 +209,8 @@ Content-Type: application/json
 ```
 
 Private requests use Ollama only. Both persisted messages are marked
-`is_private: true`; assistant messages record `provider: "ollama"`.
+`is_private: true`; assistant messages record `provider: "ollama"` and the
+Ollama model name.
 
 Unauthenticated chat still works but is stateless: no messages are stored, no
 history is loaded, and `conversation_id` is omitted from the response.
@@ -219,6 +227,39 @@ history is loaded, and `conversation_id` is omitted from the response.
 
 LLM failures preserve the user message. No partial assistant response is
 persisted.
+
+An empty, whitespace-only, or non-string provider answer is treated as a provider
+failure. Groq blank output falls back to Ollama; a blank Ollama answer (or a blank
+private Ollama answer) returns `503`. This prevents an empty assistant message
+from being persisted as a successful response.
+
+## Logging and privacy
+
+SQL echo is controlled by `DB_ECHO` and defaults to `false`. It is deliberately
+decoupled from `DEBUG` because echoed SQL includes bound parameters, which can
+contain prompts, memories, preferences, and task content. Enable it only for
+short-lived local debugging:
+
+```dotenv
+DB_ECHO=false
+```
+
+If persisting an optional pending task action fails, chat still returns the
+normal answer; the failure is logged without prompt content and no pending
+action or task row is created.
+
+## Reliability verification
+
+`backend/scripts/verify_phase7e_integration.py` runs the Phase 7E checks against
+real PostgreSQL (`asta_db` only). It creates throwaway users, verifies provider
+and model metadata, restart-safe history reads, ownership isolation, rollback on
+invalid writes, and conversation-scoped single-use pending actions, then deletes
+only the throwaway users.
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe scripts\verify_phase7e_integration.py
+```
 
 ## Limitations
 

@@ -14,6 +14,17 @@ from app.llm.ollama_provider import ollama_provider
 logger = logging.getLogger(__name__)
 
 
+def _is_blank_answer(value) -> bool:
+    """Return whether a provider answer is unusable.
+
+    Providers can return ``None``, an empty string, or whitespace instead of an
+    answer. Treating that as success would persist or return an empty assistant
+    message, so it is handled as a provider failure.
+    """
+
+    return not isinstance(value, str) or not value.strip()
+
+
 class LLMRouter:
 
     async def check_providers(self) -> dict:
@@ -91,6 +102,17 @@ class LLMRouter:
                     "Private request was not sent to the cloud."
                 ) from error
 
+            if _is_blank_answer(response):
+
+                logger.error(
+                    "Ollama returned an empty response for a private request."
+                )
+
+                raise LLMUnavailableError(
+                    "Local AI provider returned an empty response. "
+                    "Private request was not sent to the cloud."
+                )
+
             return {
                 "provider": "ollama",
                 "model": ollama_provider.model,
@@ -104,11 +126,17 @@ class LLMRouter:
 
                 response = await groq_provider.generate_response(prompt)
 
-                return {
-                    "provider": "groq",
-                    "model": groq_provider.model,
-                    "response": response
-                }
+                if not _is_blank_answer(response):
+
+                    return {
+                        "provider": "groq",
+                        "model": groq_provider.model,
+                        "response": response
+                    }
+
+                logger.warning(
+                    "Groq returned an empty response. Trying Ollama fallback."
+                )
 
             except LLMTimeoutError:
 
@@ -151,12 +179,6 @@ class LLMRouter:
 
             response = await ollama_provider.generate_response(prompt)
 
-            return {
-                "provider": "ollama",
-                "model": ollama_provider.model,
-                "response": response
-            }
-
         except LLMTimeoutError as error:
 
             logger.error(
@@ -188,6 +210,22 @@ class LLMRouter:
             raise LLMUnavailableError(
                 "Both Groq and Ollama providers failed to generate a response."
             ) from error
+
+        if _is_blank_answer(response):
+
+            logger.error(
+                "Ollama returned an empty response after Groq failed."
+            )
+
+            raise LLMUnavailableError(
+                "Both Groq and Ollama providers failed to generate a response."
+            )
+
+        return {
+            "provider": "ollama",
+            "model": ollama_provider.model,
+            "response": response
+        }
 
 
 # Create a reusable router instance

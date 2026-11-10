@@ -22,7 +22,7 @@ DATABASE_URL = URL.create(
 
 engine = create_async_engine(
     DATABASE_URL,
-    echo=settings.DEBUG,
+    echo=settings.DB_ECHO,
     pool_pre_ping=True
 )
 

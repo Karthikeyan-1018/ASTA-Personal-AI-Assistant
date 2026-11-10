@@ -54,6 +54,10 @@ class Settings:
     DB_USER: str = os.getenv("DB_USER", "postgres")
     DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 
+    # SQL echo is opt-in. It must not follow DEBUG because echoed statements
+    # include bound parameters (user prompts, memory and task content).
+    DB_ECHO: bool = os.getenv("DB_ECHO", "false").lower() == "true"
+
     # Semantic memory configuration
     EMBEDDING_MODEL_NAME: str = os.getenv(
         "EMBEDDING_MODEL_NAME",

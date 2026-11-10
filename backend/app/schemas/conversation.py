@@ -65,6 +65,7 @@ class MessageResponse(BaseModel):
     role: MessageRole
     content: str
     provider: str | None = None
+    model: str | None = None
     is_private: bool = False
     created_at: datetime
 

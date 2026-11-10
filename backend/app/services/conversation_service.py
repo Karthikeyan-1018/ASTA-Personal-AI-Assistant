@@ -191,6 +191,7 @@ class ConversationService:
         role: MessageRole | str,
         content: str,
         provider: str | None = None,
+        model: str | None = None,
         is_private: bool = False
     ) -> Message:
 
@@ -206,6 +207,7 @@ class ConversationService:
             role=MessageRole(role),
             content=cleaned,
             provider=provider,
+            model=model,
             is_private=is_private
         )
 
