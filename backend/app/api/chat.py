@@ -2,11 +2,15 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_optional_user_id
 from app.database.connection import get_db
+from app.exceptions.conversation_exceptions import (
+    ConversationNotFoundError,
+    ConversationValidationError,
+)
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
@@ -26,14 +30,23 @@ class ChatRequest(BaseModel):
     message: str
     private: bool = False
 
+    # Omit to start a new conversation. Supply an owned conversation id to
+    # continue an existing conversation.
+    conversation_id: int | None = Field(default=None, ge=1)
+
 
 class ChatResponse(BaseModel):
     provider: str
     model: str
     response: str
+    conversation_id: int | None = None
 
 
-@router.post("/", response_model=ChatResponse)
+@router.post(
+    "/",
+    response_model=ChatResponse,
+    response_model_exclude_none=True
+)
 async def chat(
     request: ChatRequest,
     user_id: int | None = Depends(get_optional_user_id),
@@ -54,10 +67,34 @@ async def chat(
             prompt=request.message,
             private=request.private,
             user_id=user_id,
-            session=session
+            session=session,
+            conversation_id=request.conversation_id
         )
 
         return result
+
+    except ConversationNotFoundError as error:
+
+        logger.warning(
+            "Conversation not found while processing a chat request."
+        )
+
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found."
+        ) from error
+
+    except ConversationValidationError as error:
+
+        logger.warning(
+            "Invalid conversation data in a chat request: %s",
+            error
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        ) from error
 
     except ValueError as error:
 

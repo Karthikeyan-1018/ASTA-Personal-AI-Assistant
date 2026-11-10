@@ -684,9 +684,36 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.json().keys()),
-            {"provider", "model", "response"}
+            {"provider", "model", "response", "conversation_id"}
         )
         self.assertEqual(response.json()["response"], "Hello from Groq")
+        self.assertIsInstance(response.json()["conversation_id"], int)
+
+    async def test_unauthenticated_chat_response_shape_is_preserved(self):
+
+        app.dependency_overrides[get_optional_user_id] = self.override_none
+
+        try:
+            (
+                stack,
+                _groq_health,
+                _groq_generate,
+                _ollama_health,
+                _ollama_generate
+            ) = self._patch_providers(groq_response="Hello from Groq")
+
+            with stack:
+                response = await self._chat({"message": "Hello"})
+        finally:
+            app.dependency_overrides[get_optional_user_id] = (
+                self.override_alice
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json().keys()),
+            {"provider", "model", "response"}
+        )
 
     # ------------------------------------------------------------------
     # 13. Database retrieval failure degrades gracefully

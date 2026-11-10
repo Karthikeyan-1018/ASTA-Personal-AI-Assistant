@@ -11,6 +11,8 @@ from app.database.base import Base
 if TYPE_CHECKING:
     from app.models.conversation import Conversation
     from app.models.memory import Memory
+    from app.models.preference import UserPreference
+    from app.models.task import Task
 
 
 class User(Base):
@@ -39,6 +41,16 @@ class User(Base):
     )
 
     conversations: Mapped[list["Conversation"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+    preferences: Mapped[list["UserPreference"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
+
+    tasks: Mapped[list["Task"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan"
     )

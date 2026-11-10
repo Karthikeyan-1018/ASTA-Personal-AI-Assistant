@@ -603,9 +603,10 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.json().keys()),
-            {"provider", "model", "response"}
+            {"provider", "model", "response", "conversation_id"}
         )
         self.assertEqual(response.json()["response"], "Hello from Groq")
+        self.assertIsInstance(response.json()["conversation_id"], int)
 
     async def test_empty_prompt_still_returns_400(self):
 
