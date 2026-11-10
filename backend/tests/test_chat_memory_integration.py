@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (registers all model tables)
-from app.api.dependencies import get_optional_user_id
+from app.api.dependencies import get_current_user_id
 from app.database.base import Base
 from app.database.connection import get_db
 from app.exceptions.llm_exceptions import LLMProviderError
@@ -61,14 +61,10 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         async def override_alice():
             return self.alice_id
 
-        async def override_none():
-            return None
-
         self.override_alice = override_alice
-        self.override_none = override_none
 
         app.dependency_overrides[get_db] = override_get_db
-        app.dependency_overrides[get_optional_user_id] = override_alice
+        app.dependency_overrides[get_current_user_id] = override_alice
 
         self.client = AsyncClient(
             transport=ASGITransport(app=app),
@@ -630,13 +626,14 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     # 12. Existing chat behaviour preserved
     # ------------------------------------------------------------------
 
-    async def test_unauthenticated_chat_ignores_memories(self):
+    async def test_unauthenticated_chat_returns_401(self):
+        """Phase 8: chat is owner-only, so anonymous requests are rejected."""
 
         content = "My career goal is to become an AI/ML Engineer."
 
         await self._add_memory(content, category="career")
 
-        app.dependency_overrides[get_optional_user_id] = self.override_none
+        app.dependency_overrides.pop(get_current_user_id, None)
 
         try:
             (
@@ -652,15 +649,14 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"message": "What is my career goal?"}
                 )
         finally:
-            app.dependency_overrides[get_optional_user_id] = (
+            app.dependency_overrides[get_current_user_id] = (
                 self.override_alice
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 401)
 
-        prompt = self._prompt(groq_generate)
-        self.assertEqual(prompt, "What is my career goal?")
-        self.assertNotIn(content, prompt)
+        groq_generate.assert_not_awaited()
+        _ollama_generate.assert_not_awaited()
 
     async def test_empty_prompt_still_returns_400(self):
 
@@ -691,7 +687,7 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unauthenticated_chat_response_shape_is_preserved(self):
 
-        app.dependency_overrides[get_optional_user_id] = self.override_none
+        app.dependency_overrides.pop(get_current_user_id, None)
 
         try:
             (
@@ -705,15 +701,12 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with stack:
                 response = await self._chat({"message": "Hello"})
         finally:
-            app.dependency_overrides[get_optional_user_id] = (
+            app.dependency_overrides[get_current_user_id] = (
                 self.override_alice
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            set(response.json().keys()),
-            {"provider", "model", "response"}
-        )
+        # Phase 8 replaces anonymous chat with owner-only chat.
+        self.assertEqual(response.status_code, 401)
 
     # ------------------------------------------------------------------
     # 13. Database retrieval failure degrades gracefully

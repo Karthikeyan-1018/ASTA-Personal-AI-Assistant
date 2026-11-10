@@ -10,6 +10,7 @@ import ollama
 from fastapi.testclient import TestClient
 from groq import APIConnectionError, APITimeoutError
 
+from app.api.dependencies import get_current_user_id
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
@@ -459,7 +460,15 @@ class ChatAPITests(unittest.TestCase):
 
     def setUp(self):
 
+        async def override_owner():
+            return 1
+
+        app.dependency_overrides[get_current_user_id] = override_owner
         self.client = TestClient(app)
+
+    def tearDown(self):
+
+        app.dependency_overrides.clear()
 
     def test_empty_prompt_returns_400(self):
 

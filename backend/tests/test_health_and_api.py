@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_current_user_id
 from app.llm.groq_provider import GroqProvider, groq_provider
 from app.llm.llm_router import llm_router
 from app.llm.ollama_provider import OllamaProvider, ollama_provider
@@ -190,7 +191,15 @@ class ChatSuccessAPITests(unittest.TestCase):
 
     def setUp(self):
 
+        async def override_owner():
+            return 1
+
+        app.dependency_overrides[get_current_user_id] = override_owner
         self.client = TestClient(app)
+
+    def tearDown(self):
+
+        app.dependency_overrides.clear()
 
     def test_successful_chat_returns_200_and_expected_format(self):
 

@@ -1,0 +1,13 @@
+My recommended roadmap:
+1. Phase 8 – Authentication and Authorization
+   
+   JWT authentication, user registration, login, password hashing, and replacing trusted identity overrides.
+2. Phase 9 – Intelligent Context Optimization
+   
+   Token-aware context budgets, model-specific limits, and better retrieval efficiency.
+3. Phase 10 – Reminders and Notifications
+   
+   Task reminders, recurring tasks, scheduling, and notification delivery.
+4. Phase 11 – Frontend Integration
+   
+   Build the actual ASTA user interface and connect it to the FastAPI backend.

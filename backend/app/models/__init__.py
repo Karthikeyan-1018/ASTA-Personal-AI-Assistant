@@ -1,5 +1,6 @@
 """SQLAlchemy models for ASTA users, memories, conversations, and tasks."""
 
+from app.models.auth import AuthSession, LoginAttempt, OwnerAccount
 from app.models.conversation import Conversation
 from app.models.memory import Memory, MemoryStatus
 from app.models.message import Message, MessageRole
@@ -24,6 +25,9 @@ from app.models.user import User
 
 __all__ = [
     "User",
+    "OwnerAccount",
+    "AuthSession",
+    "LoginAttempt",
     "Memory",
     "MemoryStatus",
     "Conversation",

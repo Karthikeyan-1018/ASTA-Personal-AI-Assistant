@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401  (registers all model tables)
-from app.api.dependencies import get_optional_user_id
+from app.api.dependencies import get_current_user_id
 from app.core.config import settings
 from app.database.base import Base
 from app.database.connection import get_db
@@ -69,15 +69,11 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         async def override_bob():
             return self.bob_id
 
-        async def override_none():
-            return None
-
         self.override_alice = override_alice
         self.override_bob = override_bob
-        self.override_none = override_none
 
         app.dependency_overrides[get_db] = override_get_db
-        app.dependency_overrides[get_optional_user_id] = override_alice
+        app.dependency_overrides[get_current_user_id] = override_alice
 
         self.client = AsyncClient(
             transport=ASGITransport(app=app),
@@ -250,7 +246,7 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             embedding=ALIGNED
         )
 
-        app.dependency_overrides[get_optional_user_id] = self.override_bob
+        app.dependency_overrides[get_current_user_id] = self.override_bob
 
         (
             stack,
@@ -273,7 +269,7 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"message": "What do I do for a living?"}
                 )
         finally:
-            app.dependency_overrides[get_optional_user_id] = (
+            app.dependency_overrides[get_current_user_id] = (
                 self.override_alice
             )
 
@@ -538,7 +534,8 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(content, prompt)
 
-    async def test_unauthenticated_semantic_chat_ignores_memories(self):
+    async def test_unauthenticated_semantic_chat_returns_401(self):
+        """Phase 8: chat is owner-only, so no retrieval or provider call runs."""
 
         await self._add_memory(
             "I want to become a machine learning engineer.",
@@ -546,7 +543,7 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
             embedding=ALIGNED
         )
 
-        app.dependency_overrides[get_optional_user_id] = self.override_none
+        app.dependency_overrides.pop(get_current_user_id, None)
 
         embed_mock = AsyncMock(return_value=ALIGNED)
 
@@ -571,17 +568,15 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"message": "What do I do for a living?"}
                 )
         finally:
-            app.dependency_overrides[get_optional_user_id] = (
+            app.dependency_overrides[get_current_user_id] = (
                 self.override_alice
             )
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 401)
 
         embed_mock.assert_not_awaited()
-
-        prompt = self._prompt(groq_generate)
-
-        self.assertEqual(prompt, "What do I do for a living?")
+        groq_generate.assert_not_awaited()
+        _ollama_generate.assert_not_awaited()
 
     # ------------------------------------------------------------------
     # 4. Existing chat contract

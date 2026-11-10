@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user_id
+from app.api.dependencies import get_current_user_id, require_csrf
 from app.core.config import settings
 from app.database.connection import get_db
 from app.exceptions.conversation_exceptions import (
@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/conversations",
-    tags=["Conversations"]
+    tags=["Conversations"],
+    dependencies=[Depends(require_csrf)]
 )
 
 

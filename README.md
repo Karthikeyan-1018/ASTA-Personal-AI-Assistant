@@ -18,6 +18,47 @@ long-term memory.
 - Timezone-aware deadline views (overdue, today, tomorrow, upcoming).
 - Unified context assembly from preferences, memories, tasks, deadlines, and bounded history.
 - Per-user ownership checks on every conversation, message, preference, and task query.
+- Single-owner authentication with Argon2id passwords, revocable cookie sessions, and CSRF protection.
+- Database-backed, progressive login rate limiting that survives backend restarts.
+- Configurable trusted hosts and explicit CORS origins for laptop and phone access on a private LAN.
+
+## Dependencies and environment setup
+
+ASTA targets Python 3.12. Dependencies are pinned in two files:
+
+- `backend/requirements.txt` - runtime dependencies, including the PostgreSQL
+  driver, Argon2id support, timezone data, and the ML stack used by semantic
+  memory.
+- `backend/requirements-dev.txt` - includes the runtime file and adds the
+  test-only async SQLite driver.
+
+```powershell
+cd C:\Asta\backend
+..\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+For a production or runtime-only install, use `requirements.txt` instead.
+
+The semantic-memory stack (`sentence-transformers`, PyTorch, Transformers,
+NumPy, SciPy, scikit-learn) is large and is genuinely required for embedding
+generation. Model weights are downloaded by `sentence-transformers` on first
+semantic use and are **not** committed to the repository. Keyword retrieval
+remains available if semantic storage is unavailable.
+
+`tzdata` is included because Windows does not ship the IANA timezone database
+used for deadline handling.
+
+To validate installation in a fresh Python 3.12 environment without touching
+`C:\Asta\venv`:
+
+```powershell
+cd C:\Asta\backend
+..\venv\Scripts\python.exe scripts\verify_phase81_dependencies.py
+```
+
+The script creates and removes a throwaway virtual environment, runs
+`pip check`, imports every direct dependency, and verifies that
+`app.main:app` imports.
 
 ## Conversation persistence
 
@@ -89,10 +130,40 @@ See [docs/context_architecture.md](docs/context_architecture.md) for the full
 retrieval flow, relevance rules, priority ordering, budgets, privacy guarantees,
 failure handling, and example assembly.
 
+## Authentication and local-network access
+
+ASTA has one owner account. Passwords are hashed with Argon2id, and login issues
+an opaque, revocable session cookie (`HttpOnly`, `Secure` by default,
+`SameSite=Lax`) plus a CSRF token. Chat, conversations, memories, preferences,
+tasks, and task-action confirmations all require a valid session; identity is
+never accepted from request bodies, query strings, or headers.
+
+Failed login and owner-setup attempts are counted per source IP and normalised
+account identifier in PostgreSQL. Five failures start a 15-minute cooldown, and
+repeated abuse doubles the cooldown up to 24 hours. Blocked requests return
+`429 Too Many Requests` with `Retry-After`. Cooldowns always expire, a
+successful login clears the pair's state, and a restart does not reset the
+counter.
+
+Create the owner with the local CLI (`scripts/create_owner.py`) or the one-time
+`POST /api/auth/setup` endpoint guarded by `AUTH_OWNER_SETUP_TOKEN`. For phone
+access, use HTTPS on a private LAN port, restrict Windows Firewall to the Private
+profile and `LocalSubnet`, and keep PostgreSQL and Ollama on loopback only.
+`X-Forwarded-For` is ignored unless the direct peer is listed in
+`AUTH_TRUSTED_PROXIES`.
+
+See [docs/authentication_and_lan_security.md](docs/authentication_and_lan_security.md)
+for owner setup, login/logout, session lifecycle, CSRF, LAN/HTTPS configuration,
+Windows Firewall rules, the future frontend contract, and security limitations.
+
 ## API overview
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `POST` | `/api/auth/setup` | Create the single owner (one-time, setup token required) |
+| `POST` | `/api/auth/login` | Authenticate and start a session |
+| `POST` | `/api/auth/logout` | Revoke the current session |
+| `GET` | `/api/auth/me` | Return the authenticated owner and expiry |
 | `POST` | `/api/chat/` | Send a message, optionally continuing a conversation |
 | `POST` | `/api/conversations/` | Create a conversation |
 | `GET` | `/api/conversations/` | List the current user's conversations |
@@ -131,6 +202,11 @@ failure handling, and example assembly.
 | `POST` | `/api/task-actions/{id}/confirm` | Confirm and execute a pending action |
 | `POST` | `/api/task-actions/{id}/reject` | Reject a pending action |
 
+All endpoints above except `POST /api/auth/login` and the one-time
+`POST /api/auth/setup` require a valid session. State-changing requests must
+also send `X-CSRF-Token`. `/`, `/health`, and `/api/health/providers` remain
+public because they expose no private data.
+
 ## Configuration
 
 Context and persistence limits are configured through environment variables:
@@ -157,14 +233,40 @@ TASK_INTENT_LLM_ENABLED=true
 TASK_ACTION_CONFIRMATION_TTL_SECONDS=600
 TASK_DEFAULT_TIMEZONE=
 TASK_INTENT_MAX_RESULTS=20
+
+# Single-owner authentication
+AUTH_OWNER_SETUP_TOKEN=
+AUTH_SESSION_LIFETIME_HOURS=168
+AUTH_SESSION_COOKIE_NAME=asta_session
+AUTH_CSRF_COOKIE_NAME=asta_csrf
+AUTH_COOKIE_PATH=/api
+AUTH_CSRF_COOKIE_PATH=/
+AUTH_COOKIE_SECURE=true
+AUTH_COOKIE_SAMESITE=lax
+AUTH_SESSION_LAST_USED_UPDATE_SECONDS=300
+AUTH_PASSWORD_MIN_LENGTH=12
+AUTH_PASSWORD_MAX_LENGTH=128
+AUTH_ARGON2_TIME_COST=3
+AUTH_ARGON2_MEMORY_COST=65536
+AUTH_ARGON2_PARALLELISM=4
+
+# Database-backed login rate limiting
+AUTH_LOGIN_RATE_LIMIT_ENABLED=true
+AUTH_LOGIN_MAX_FAILED_ATTEMPTS=5
+AUTH_LOGIN_INITIAL_COOLDOWN_MINUTES=15
+AUTH_LOGIN_COOLDOWN_MULTIPLIER=2
+AUTH_LOGIN_MAX_COOLDOWN_MINUTES=1440
+AUTH_LOGIN_ATTEMPT_RETENTION_HOURS=48
+AUTH_TRUSTED_PROXIES=
+
+# Explicit frontend origins (empty for same-origin) and Host allowlist
+CORS_ALLOWED_ORIGINS=
+TRUSTED_HOSTS=localhost,127.0.0.1,::1,testserver,test
 ```
 
-IANA timezone support uses Python's `zoneinfo`. On platforms without system
-timezone data (for example Windows), install `tzdata`:
-
-```powershell
-..\venv\Scripts\python.exe -m pip install tzdata
-```
+IANA timezone support uses Python's `zoneinfo`. `tzdata` is included in
+`requirements.txt` for platforms such as Windows that do not ship system
+timezone data.
 
 Apply database migrations with:
 
@@ -185,4 +287,22 @@ Real-PostgreSQL integration checks (Phase 7E, `asta_db` only) run separately:
 ```powershell
 cd backend
 ..\venv\Scripts\python.exe scripts\verify_phase7e_integration.py
+```
+
+Phase 8 authentication and session checks on real PostgreSQL (`asta_db` only,
+throwaway rows, automatic cleanup):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase8_auth -v
+..\venv\Scripts\python.exe scripts\verify_phase8_auth.py
+```
+
+Phase 8.1 dependency and rate-limit checks:
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase81_dependencies tests.test_phase81_rate_limit -v
+..\venv\Scripts\python.exe scripts\verify_phase81_dependencies.py
+..\venv\Scripts\python.exe scripts\verify_phase81_rate_limit.py
 ```

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_optional_user_id
+from app.api.dependencies import get_current_user_id, require_csrf
 from app.database.connection import get_db
 from app.exceptions.conversation_exceptions import (
     ConversationNotFoundError,
@@ -23,7 +23,11 @@ from app.services.chat_service import chat_service
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/chat", tags=["Chat"])
+router = APIRouter(
+    prefix="/api/chat",
+    tags=["Chat"],
+    dependencies=[Depends(require_csrf)]
+)
 
 
 class ChatRequest(BaseModel):
@@ -49,7 +53,7 @@ class ChatResponse(BaseModel):
 )
 async def chat(
     request: ChatRequest,
-    user_id: int | None = Depends(get_optional_user_id),
+    user_id: int = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_db)
 ):
 

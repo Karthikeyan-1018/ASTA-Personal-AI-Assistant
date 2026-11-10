@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user_id
+from app.api.dependencies import get_current_user_id, require_csrf
 from app.database.connection import get_db
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
@@ -34,7 +34,11 @@ from app.services.preference_service import preference_service
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/preferences", tags=["Preferences"])
+router = APIRouter(
+    prefix="/api/preferences",
+    tags=["Preferences"],
+    dependencies=[Depends(require_csrf)]
+)
 
 
 def _not_found() -> HTTPException:

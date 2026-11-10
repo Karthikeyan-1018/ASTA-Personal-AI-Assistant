@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import get_current_user_id
+from app.api.dependencies import get_current_user_id, require_csrf
 from app.database.connection import get_db
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
@@ -39,7 +39,11 @@ from app.services.memory_service import memory_service
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/memories", tags=["Memories"])
+router = APIRouter(
+    prefix="/api/memories",
+    tags=["Memories"],
+    dependencies=[Depends(require_csrf)]
+)
 
 
 def _memory_not_found() -> HTTPException:

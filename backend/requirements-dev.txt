@@ -1,0 +1,11 @@
+# ASTA backend development and test dependencies (Python 3.12).
+#
+# Install with:
+#   python -m pip install -r requirements-dev.txt
+#
+# This file includes the runtime requirements first.
+
+-r requirements.txt
+
+# Test-only async SQLite driver. PostgreSQL remains the production database.
+aiosqlite==0.22.1

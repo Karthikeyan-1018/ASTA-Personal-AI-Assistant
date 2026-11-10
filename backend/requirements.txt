@@ -1,0 +1,44 @@
+# ASTA backend runtime dependencies (Python 3.12).
+#
+# Install with:
+#   python -m pip install -r requirements.txt
+#
+# Versions are pinned to the stack that was tested on this project. Transitive
+# dependencies are resolved by pip; the large ML stack is pinned explicitly
+# because semantic memory imports sentence-transformers at runtime.
+
+# Web framework and ASGI server
+fastapi==0.162.0
+starlette==1.10.0
+uvicorn==0.54.0
+pydantic==2.14.2
+python-dotenv==1.2.4
+
+# PostgreSQL, async SQLAlchemy, migrations, and pgvector
+SQLAlchemy==2.1.8
+greenlet==3.5.6
+asyncpg==0.32.0
+alembic==1.20.1
+pgvector==0.5.1
+
+# Single-owner authentication (Argon2id hashing)
+argon2-cffi==25.1.0
+
+# LLM providers and their HTTP transport
+groq==1.7.0
+ollama==0.6.3
+httpx==0.28.1
+
+# Semantic memory embeddings. This pulls a large ML stack (PyTorch,
+# Transformers, NumPy, SciPy, scikit-learn). See README.md for the optional
+# model-download note; the code falls back to keyword retrieval when semantic
+# storage is unavailable, but these packages are required for the full runtime.
+sentence-transformers==5.7.0
+torch==2.15.0
+transformers==5.22.2
+numpy==2.5.4
+scipy==1.18.1
+scikit-learn==1.9.1
+
+# IANA timezone database for Windows and other platforms without system tzdata.
+tzdata==2026.6
