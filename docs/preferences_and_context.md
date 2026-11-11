@@ -310,7 +310,7 @@ PREFERENCE_MAX_VALUE_CHARS=1000
 
 CONTEXT_MAX_CHARS=12000
 CONTEXT_PREFERENCE_SECTION_CHARS=2500
-CONTEXT_PRIORITY_ORDER=history,preference,memory,task,deadline
+CONTEXT_PRIORITY_ORDER=history,task,deadline,preference,memory
 ```
 
 ## Limitations

@@ -11,3 +11,31 @@ My recommended roadmap:
 4. Phase 11 – Frontend Integration
    
    Build the actual ASTA user interface and connect it to the FastAPI backend.
+
+
+
+Critical Missing ComponentsPhase / Focus AreaProposed AdditionWhy It MattersTooling & Function CallingFunction Calling & Tool EngineAn assistant without tools can only talk. ASTA needs an execution engine (system commands, Web Search, API callers, file system interactions, Python execution).System IntegrationLocal OS & System AutomationSince ASTA runs locally, add OS-level control (clipboard reading, application launcher, desktop media control, local file indexing).Architecture / UXStreaming & Async ArchitectureLLM latency can feel slow. Implementing WebSockets or Server-Sent Events (SSE) for real-time streaming tokens and background task updates is essential for UX.Resilience & SafetyFallback & Local Failure HandlingWhat happens when network access drops or Groq rate limits kick in? Define offline fallback strategies (switching dynamically to a smaller quantized local model via Ollama).Voice / Input UXWake Word & Local STT/TTSPhase 12 mentions voice, but specifically specify offline Wake Word detection (e.g., Porcupine/open-source alternatives) and low-latency local STT (Whisper) + TTS (Piper/Kokoro).
+
+Do not start all five components immediately.
+1. Phase 10 – Reminders and Notifications
+   
+   Complete your current task-management workflow.
+2. Phase 11 – Function Calling and Tool Engine
+   
+   This is the biggest capability upgrade. It gives ASTA the ability to take actions.
+3. Phase 12 – Local OS Automation
+   
+   Connect the tool engine to your Windows environment.
+4. Phase 13 – Streaming and Async
+   
+   Make interactions feel responsive.
+5. Phase 14 – Frontend
+   
+   Build the interface around the actual backend capabilities.
+6. Phase 15 – Voice
+   
+   Add wake-word detection, local speech recognition and speech generation.
+7. Phase 17 – Offline Resilience
+   
+   Strengthen local inference and failure recovery.
+My strongest recommendation: Prioritize Phase 11, the Function Calling and Tool Engine, after Phase 10. It is the foundation that will allow ASTA to interact with your operating system, search the web, work with files and automate tasks safely. Without this execution layer, adding more AI models alone will not make ASTA a capable personal agent.

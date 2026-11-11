@@ -4,8 +4,11 @@ Phase 7B adds structured, user-owned tasks and deadlines to ASTA. Tasks are
 stored in PostgreSQL, exposed through a user-scoped REST API, and injected into
 chat prompts through the Phase 7A unified context architecture.
 
-The implementation does **not** perform automatic task extraction, reminders,
-notifications, JWT authentication, frontend work, or LangGraph orchestration.
+Phase 10A adds task-scoped reminder persistence and CRUD. It does not deliver
+notifications, run a background scheduler, or generate recurring tasks. Those
+remain later Phase 10 subphases. The implementation also does not perform
+automatic task extraction, JWT authentication, frontend work, or LangGraph
+orchestration.
 
 ## Database architecture
 
@@ -249,6 +252,48 @@ Deadline views return only pending and in-progress tasks, except
 Invalid request bodies return FastAPI's standard `422` validation response.
 Service-level conflicts return `400`.
 
+## Task reminders (Phase 10A)
+
+A reminder belongs to exactly one task and one owner. The `task_reminders`
+table stores the resolved UTC instant, the optional offset that produced it,
+a lifecycle status, and duplicate-prevention metadata. Deleting a task cascades
+to its reminders; deleting a user cascades to their tasks and reminders.
+
+Create a reminder with either a deadline-relative offset or an absolute,
+timezone-aware instant:
+
+```json
+{"offset_minutes": 60}
+```
+
+```json
+{"remind_at": "2026-11-20T16:00:00+00:00"}
+```
+
+For timed tasks, `offset_minutes` is measured from the exact deadline. For
+date-only tasks, the anchor is `REMINDER_DEFAULT_LOCAL_TIME` (09:00 by default)
+on the due date in the task's IANA timezone. An offset of `1440` therefore means
+09:00 the previous local day. Explicit instants must include a timezone offset.
+Reminders must be in the future and can only be created or rescheduled for
+pending or in-progress tasks.
+
+Endpoints:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/tasks/{task_id}/reminders` | Create a reminder |
+| `GET` | `/api/tasks/{task_id}/reminders` | List one task's reminders |
+| `GET` | `/api/reminders` | List the owner's reminders |
+| `PATCH` | `/api/reminders/{id}` | Reschedule a pending reminder |
+| `POST` | `/api/reminders/{id}/cancel` | Cancel a pending reminder |
+| `DELETE` | `/api/reminders/{id}` | Delete a reminder |
+
+All reminders require the existing session and owner checks. State-changing
+requests also require CSRF. Notification delivery, background scheduling, and
+recurring tasks are not part of Phase 10A. See
+[reminders_and_notifications.md](reminders_and_notifications.md) for the full
+schema, validation rules, and roadmap.
+
 ## Context provider integration
 
 `TaskContextProvider` and `DeadlineContextProvider` use the structured
@@ -267,10 +312,10 @@ Service-level conflicts return `400`.
   per-section character limits and the overall `CONTEXT_MAX_CHARS` budget.
 - Only the authenticated user's tasks are queried.
 
-The existing context priority order remains authoritative:
+The configured context priority order is authoritative:
 
 ```dotenv
-CONTEXT_PRIORITY_ORDER=history,preference,memory,task,deadline
+CONTEXT_PRIORITY_ORDER=history,task,deadline,preference,memory
 ```
 
 ## Configuration
@@ -302,7 +347,10 @@ cd backend
 ## Known limitations
 
 - No recurring tasks, subtasks, attachments, or tags.
-- No reminders, notifications, background scheduling, or automatic extraction.
+- Reminders are CRUD-only in Phase 10A; notification delivery, background
+  scheduling, notification preferences, and recurring-task generation are later
+  Phase 10 subphases.
+- Natural-language reminder scheduling is not part of Phase 10A.
 - Each deadline has one timezone; cross-timezone travel is not modelled.
 - Deadline queries that depend on per-task timezones are evaluated in Python
   after loading the user's open deadline-bearing tasks. This is appropriate for

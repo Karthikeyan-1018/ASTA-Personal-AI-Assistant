@@ -16,6 +16,51 @@ from app.exceptions.llm_exceptions import (
 logger = logging.getLogger(__name__)
 
 
+def _as_positive_int(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    return number if number >= 0 else None
+
+
+def _field(response, name):
+    """Read a field from either a mapping or an object response."""
+
+    if isinstance(response, dict):
+        return response.get(name)
+
+    return getattr(response, name, None)
+
+
+def _extract_usage(response) -> dict | None:
+    """Return provider-reported token counts, or ``None`` when absent.
+
+    Ollama reports prompt and completion eval counts. Only numeric counts are
+    stored; response text is never copied here.
+    """
+
+    input_tokens = _as_positive_int(_field(response, "prompt_eval_count"))
+    output_tokens = _as_positive_int(_field(response, "eval_count"))
+
+    if input_tokens is None and output_tokens is None:
+        return None
+
+    total_tokens = (
+        (input_tokens or 0) + (output_tokens or 0)
+        if input_tokens is not None or output_tokens is not None
+        else None
+    )
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "source": "provider",
+    }
+
+
 class OllamaProvider:
 
     def __init__(self):
@@ -26,14 +71,25 @@ class OllamaProvider:
 
         self.model = settings.OLLAMA_MODEL
 
+        # Populated after a successful call when the server reports token
+        # usage. It contains counts only, never prompt or response content.
+        self.last_usage = None
+
     # Generate response with timeout handling
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(
+        self,
+        prompt: str,
+        model: str | None = None
+    ) -> str:
+
+        self.last_usage = None
+        target_model = model or self.model
 
         try:
 
             response = await asyncio.wait_for(
                 self.client.chat(
-                    model=self.model,
+                    model=target_model,
                     messages=[
                         {
                             "role": "user",
@@ -47,7 +103,10 @@ class OllamaProvider:
                 timeout=settings.OLLAMA_TIMEOUT_SECONDS
             )
 
-            return response.message.content
+            content = response.message.content
+            self.last_usage = _extract_usage(response)
+
+            return content
 
         except (asyncio.TimeoutError, httpx.TimeoutException) as error:
 

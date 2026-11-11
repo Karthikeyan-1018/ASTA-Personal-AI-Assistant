@@ -190,9 +190,8 @@ class TaskService:
     # CRUD
     # ------------------------------------------------------------------
 
-    async def create_task(
+    def _prepare_task(
         self,
-        session: AsyncSession,
         user_id: int,
         title: str,
         description: str | None = None,
@@ -204,6 +203,7 @@ class TaskService:
         timezone: str | None = None,
         now: datetime | None = None,
     ) -> Task:
+        """Build a validated, unattached task instance."""
 
         current = now or _utcnow()
 
@@ -235,6 +235,36 @@ class TaskService:
 
         _apply_status(task, normalised_status, current)
 
+        return task
+
+    async def create_task(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        title: str,
+        description: str | None = None,
+        category: TaskCategory | str = TaskCategory.OTHER,
+        priority: TaskPriority | str = TaskPriority.MEDIUM,
+        status: TaskStatus | str = TaskStatus.PENDING,
+        due_date: date | None = None,
+        due_time: time | None = None,
+        timezone: str | None = None,
+        now: datetime | None = None,
+    ) -> Task:
+
+        task = self._prepare_task(
+            user_id=user_id,
+            title=title,
+            description=description,
+            category=category,
+            priority=priority,
+            status=status,
+            due_date=due_date,
+            due_time=due_time,
+            timezone=timezone,
+            now=now,
+        )
+
         try:
             session.add(task)
             await session.commit()
@@ -247,6 +277,44 @@ class TaskService:
                 user_id,
             )
             raise
+
+        return task
+
+    async def create_task_in_session(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        title: str,
+        description: str | None = None,
+        category: TaskCategory | str = TaskCategory.OTHER,
+        priority: TaskPriority | str = TaskPriority.MEDIUM,
+        status: TaskStatus | str = TaskStatus.PENDING,
+        due_date: date | None = None,
+        due_time: time | None = None,
+        timezone: str | None = None,
+        now: datetime | None = None,
+    ) -> Task:
+        """Build, add, and flush a task without committing.
+
+        Used by recurrence generation so the occurrence task and its unique
+        occurrence link are committed atomically.
+        """
+
+        task = self._prepare_task(
+            user_id=user_id,
+            title=title,
+            description=description,
+            category=category,
+            priority=priority,
+            status=status,
+            due_date=due_date,
+            due_time=due_time,
+            timezone=timezone,
+            now=now,
+        )
+
+        session.add(task)
+        await session.flush()
 
         return task
 

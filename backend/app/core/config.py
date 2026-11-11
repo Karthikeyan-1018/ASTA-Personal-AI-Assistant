@@ -170,6 +170,127 @@ class Settings:
         ""
     )
 
+    # Local wall-clock anchor used when a reminder is expressed as an offset
+    # from a date-only task. Timed tasks anchor on their exact deadline; this
+    # setting prevents date-only reminders from resolving to end-of-day.
+    REMINDER_DEFAULT_LOCAL_TIME: str = os.getenv(
+        "REMINDER_DEFAULT_LOCAL_TIME",
+        "09:00"
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 10B reminder scheduler
+    # ------------------------------------------------------------------
+
+    REMINDER_SCHEDULER_ENABLED: bool = (
+        os.getenv("REMINDER_SCHEDULER_ENABLED", "true").lower() == "true"
+    )
+
+    REMINDER_SCHEDULER_POLL_SECONDS: int = int(
+        os.getenv("REMINDER_SCHEDULER_POLL_SECONDS", "30")
+    )
+
+    REMINDER_SCHEDULER_BATCH_SIZE: int = int(
+        os.getenv("REMINDER_SCHEDULER_BATCH_SIZE", "25")
+    )
+
+    # A claimed reminder is returned to the pending queue when its worker
+    # disappears without finishing. The lease must comfortably exceed normal
+    # delivery time.
+    REMINDER_PROCESSING_LEASE_SECONDS: int = int(
+        os.getenv("REMINDER_PROCESSING_LEASE_SECONDS", "300")
+    )
+
+    REMINDER_MAX_ATTEMPTS: int = int(
+        os.getenv("REMINDER_MAX_ATTEMPTS", "5")
+    )
+
+    REMINDER_RETRY_BACKOFF_SECONDS: int = int(
+        os.getenv("REMINDER_RETRY_BACKOFF_SECONDS", "60")
+    )
+
+    REMINDER_RETRY_BACKOFF_MULTIPLIER: float = float(
+        os.getenv("REMINDER_RETRY_BACKOFF_MULTIPLIER", "2")
+    )
+
+    REMINDER_RETRY_BACKOFF_MAX_SECONDS: int = int(
+        os.getenv("REMINDER_RETRY_BACKOFF_MAX_SECONDS", "3600")
+    )
+
+    REMINDER_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS: int = int(
+        os.getenv("REMINDER_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS", "10")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 10C/10E notification retention and recovery
+    # ------------------------------------------------------------------
+
+    NOTIFICATION_RETENTION_DAYS: int = int(
+        os.getenv("NOTIFICATION_RETENTION_DAYS", "365")
+    )
+
+    NOTIFICATION_MAX_ATTEMPTS: int = int(
+        os.getenv("NOTIFICATION_MAX_ATTEMPTS", "5")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 10D recurring tasks
+    # ------------------------------------------------------------------
+
+    RECURRENCE_GENERATION_ENABLED: bool = (
+        os.getenv("RECURRENCE_GENERATION_ENABLED", "true").lower() == "true"
+    )
+
+    RECURRENCE_GENERATION_HORIZON_DAYS: int = int(
+        os.getenv("RECURRENCE_GENERATION_HORIZON_DAYS", "30")
+    )
+
+    RECURRENCE_GENERATION_BATCH_SIZE: int = int(
+        os.getenv("RECURRENCE_GENERATION_BATCH_SIZE", "25")
+    )
+
+    RECURRENCE_MAX_GENERATIONS_PER_RUN: int = int(
+        os.getenv("RECURRENCE_MAX_GENERATIONS_PER_RUN", "10")
+    )
+
+    RECURRENCE_GENERATION_INTERVAL_SECONDS: int = int(
+        os.getenv("RECURRENCE_GENERATION_INTERVAL_SECONDS", "3600")
+    )
+
+    RECURRENCE_RETRY_BACKOFF_SECONDS: int = int(
+        os.getenv("RECURRENCE_RETRY_BACKOFF_SECONDS", "300")
+    )
+
+    RECURRENCE_PROCESSING_LEASE_SECONDS: int = int(
+        os.getenv("RECURRENCE_PROCESSING_LEASE_SECONDS", "300")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 10F notification preferences and quiet hours
+    # ------------------------------------------------------------------
+
+    NOTIFICATION_QUIET_HOURS_DEFAULT_ENABLED: bool = (
+        os.getenv(
+            "NOTIFICATION_QUIET_HOURS_DEFAULT_ENABLED",
+            "false",
+        ).lower() == "true"
+    )
+
+    NOTIFICATION_QUIET_HOURS_DEFAULT_START: str = os.getenv(
+        "NOTIFICATION_QUIET_HOURS_DEFAULT_START",
+        "22:00"
+    )
+
+    NOTIFICATION_QUIET_HOURS_DEFAULT_END: str = os.getenv(
+        "NOTIFICATION_QUIET_HOURS_DEFAULT_END",
+        "07:00"
+    )
+
+    NOTIFICATION_QUIET_HOURS_DEFAULT_TIMEZONE: str = os.getenv(
+        "NOTIFICATION_QUIET_HOURS_DEFAULT_TIMEZONE",
+        "UTC"
+    )
+
     TASK_INTENT_MAX_RESULTS: int = int(
         os.getenv("TASK_INTENT_MAX_RESULTS", "20")
     )
@@ -337,10 +458,249 @@ class Settings:
 
     # Sources are listed from highest to lowest priority. The current user
     # message always has the highest priority and is never truncated.
+    # Phase 9 raises conversation history and structured task/deadline context
+    # above preferences and long-term memories, so less relevant stored context
+    # is removed first when a token budget is tight.
     CONTEXT_PRIORITY_ORDER: str = os.getenv(
         "CONTEXT_PRIORITY_ORDER",
-        "history,preference,memory,task,deadline"
+        "history,task,deadline,preference,memory"
     )
+
+    # ------------------------------------------------------------------
+    # Phase 9 AI optimization
+    # ------------------------------------------------------------------
+
+    # Token-aware context budgeting. Counting uses a deterministic heuristic
+    # unless a model-specific tokenizer is added in future; no tokenizer model
+    # is downloaded at request time.
+    AI_TOKEN_BUDGET_ENABLED: bool = (
+        os.getenv("AI_TOKEN_BUDGET_ENABLED", "true").lower() == "true"
+    )
+
+    AI_CHARS_PER_TOKEN: float = float(
+        os.getenv("AI_CHARS_PER_TOKEN", "4.0")
+    )
+
+    AI_DEFAULT_CONTEXT_WINDOW_TOKENS: int = int(
+        os.getenv("AI_DEFAULT_CONTEXT_WINDOW_TOKENS", "8192")
+    )
+
+    # Provider defaults are used when no model-specific entry exists. The
+    # values are conservative and can be lowered for smaller deployments.
+    AI_GROQ_CONTEXT_WINDOW_TOKENS: int = int(
+        os.getenv("AI_GROQ_CONTEXT_WINDOW_TOKENS", "131072")
+    )
+
+    AI_OLLAMA_CONTEXT_WINDOW_TOKENS: int = int(
+        os.getenv("AI_OLLAMA_CONTEXT_WINDOW_TOKENS", "40960")
+    )
+
+    # Optional comma-separated "model:context_window" overrides. Example:
+    # openai/gpt-oss-20b:131072,qwen3:8b:40960
+    AI_MODEL_CONTEXT_WINDOWS: str = os.getenv(
+        "AI_MODEL_CONTEXT_WINDOWS",
+        ""
+    )
+
+    AI_RESPONSE_RESERVE_TOKENS: int = int(
+        os.getenv("AI_RESPONSE_RESERVE_TOKENS", "1024")
+    )
+
+    AI_CONTEXT_SAFETY_TOKENS: int = int(
+        os.getenv("AI_CONTEXT_SAFETY_TOKENS", "256")
+    )
+
+    # Deterministic query classification runs first. An optional LLM fallback
+    # is disabled by default because it adds latency and is never allowed to
+    # decide authorization or execute a task mutation.
+    AI_QUERY_CLASSIFIER_ENABLED: bool = (
+        os.getenv("AI_QUERY_CLASSIFIER_ENABLED", "true").lower() == "true"
+    )
+
+    AI_QUERY_CLASSIFIER_LLM_FALLBACK_ENABLED: bool = (
+        os.getenv(
+            "AI_QUERY_CLASSIFIER_LLM_FALLBACK_ENABLED",
+            "false",
+        ).lower() == "true"
+    )
+
+    # A deterministic result at or above this confidence is kept as-is. Lower
+    # confidence results may use the optional LLM fallback when it is enabled.
+    AI_QUERY_CLASSIFIER_LLM_FALLBACK_THRESHOLD: float = float(
+        os.getenv(
+            "AI_QUERY_CLASSIFIER_LLM_FALLBACK_THRESHOLD",
+            "0.6",
+        )
+    )
+
+    # groq_first preserves the existing non-private Groq-first behaviour.
+    # local_first sends non-private requests to Ollama first. cost_aware uses
+    # the per-complexity provider mapping below.
+    AI_ROUTING_POLICY: str = os.getenv(
+        "AI_ROUTING_POLICY",
+        "groq_first"
+    ).strip().lower()
+
+    # cost_aware provider mapping. Private requests ignore this mapping and
+    # always use Ollama.
+    AI_ROUTING_SIMPLE_PROVIDER: str = os.getenv(
+        "AI_ROUTING_SIMPLE_PROVIDER",
+        "ollama"
+    ).strip().lower()
+
+    AI_ROUTING_MODERATE_PROVIDER: str = os.getenv(
+        "AI_ROUTING_MODERATE_PROVIDER",
+        "groq"
+    ).strip().lower()
+
+    AI_ROUTING_COMPLEX_PROVIDER: str = os.getenv(
+        "AI_ROUTING_COMPLEX_PROVIDER",
+        "groq"
+    ).strip().lower()
+
+    AI_ROUTING_DYNAMIC_PROVIDER: str = os.getenv(
+        "AI_ROUTING_DYNAMIC_PROVIDER",
+        "groq"
+    ).strip().lower()
+
+    # Optional comma-separated "complexity:provider:model" overrides. Model
+    # names otherwise come from the provider configuration, so they are not
+    # duplicated throughout the codebase.
+    AI_ROUTING_MODEL_OVERRIDES: str = os.getenv(
+        "AI_ROUTING_MODEL_OVERRIDES",
+        ""
+    )
+
+    # Configured prices are optional. Zero means "unknown"; usage summaries
+    # report costs only when a real configured price is available.
+    AI_GROQ_INPUT_COST_PER_MILLION: float = float(
+        os.getenv("AI_GROQ_INPUT_COST_PER_MILLION", "0")
+    )
+
+    AI_GROQ_OUTPUT_COST_PER_MILLION: float = float(
+        os.getenv("AI_GROQ_OUTPUT_COST_PER_MILLION", "0")
+    )
+
+    AI_OLLAMA_INPUT_COST_PER_MILLION: float = float(
+        os.getenv("AI_OLLAMA_INPUT_COST_PER_MILLION", "0")
+    )
+
+    AI_OLLAMA_OUTPUT_COST_PER_MILLION: float = float(
+        os.getenv("AI_OLLAMA_OUTPUT_COST_PER_MILLION", "0")
+    )
+
+    # Semantic response cache. Only stateless, non-private, non-sensitive,
+    # non-dynamic eligible requests may be cached.
+    AI_CACHE_ENABLED: bool = (
+        os.getenv("AI_CACHE_ENABLED", "true").lower() == "true"
+    )
+
+    AI_CACHE_SIMILARITY_THRESHOLD: float = float(
+        os.getenv("AI_CACHE_SIMILARITY_THRESHOLD", "0.95")
+    )
+
+    AI_CACHE_TTL_SECONDS: int = int(
+        os.getenv("AI_CACHE_TTL_SECONDS", "3600")
+    )
+
+    AI_CACHE_MAX_ENTRIES_PER_USER: int = int(
+        os.getenv("AI_CACHE_MAX_ENTRIES_PER_USER", "500")
+    )
+
+    AI_CACHE_PROMPT_VERSION: str = os.getenv(
+        "AI_CACHE_PROMPT_VERSION",
+        "phase9-v1"
+    )
+
+    AI_CACHE_CONFIG_VERSION: str = os.getenv(
+        "AI_CACHE_CONFIG_VERSION",
+        "1"
+    )
+
+    AI_CACHE_ALLOWED_COMPLEXITIES: str = os.getenv(
+        "AI_CACHE_ALLOWED_COMPLEXITIES",
+        "simple,moderate"
+    )
+
+    AI_CACHE_STATELESS_ONLY: bool = (
+        os.getenv("AI_CACHE_STATELESS_ONLY", "true").lower() == "true"
+    )
+
+    AI_CACHE_SEMANTIC_ENABLED: bool = (
+        os.getenv("AI_CACHE_SEMANTIC_ENABLED", "true").lower() == "true"
+    )
+
+    # Structured AI usage tracking. Records never contain prompt or response
+    # content, credentials, or provider error details.
+    AI_USAGE_TRACKING_ENABLED: bool = (
+        os.getenv("AI_USAGE_TRACKING_ENABLED", "true").lower() == "true"
+    )
+
+    AI_USAGE_RETENTION_DAYS: int = int(
+        os.getenv("AI_USAGE_RETENTION_DAYS", "90")
+    )
+
+    AI_USAGE_RECENT_LIMIT: int = int(
+        os.getenv("AI_USAGE_RECENT_LIMIT", "50")
+    )
+
+    # Hybrid memory retrieval blends semantic and keyword signals. Keyword
+    # retrieval remains the fallback when semantic retrieval is unavailable.
+    AI_MEMORY_HYBRID_ENABLED: bool = (
+        os.getenv("AI_MEMORY_HYBRID_ENABLED", "true").lower() == "true"
+    )
+
+    AI_MEMORY_SEMANTIC_WEIGHT: float = float(
+        os.getenv("AI_MEMORY_SEMANTIC_WEIGHT", "0.7")
+    )
+
+    AI_MEMORY_KEYWORD_WEIGHT: float = float(
+        os.getenv("AI_MEMORY_KEYWORD_WEIGHT", "0.3")
+    )
+
+    AI_MEMORY_CANDIDATE_LIMIT: int = int(
+        os.getenv("AI_MEMORY_CANDIDATE_LIMIT", "20")
+    )
+
+    AI_MEMORY_MIN_HYBRID_SCORE: float = float(
+        os.getenv("AI_MEMORY_MIN_HYBRID_SCORE", "0.05")
+    )
+
+    @property
+    def ai_cache_allowed_complexities(self) -> set[str]:
+        return {
+            value.strip().lower()
+            for value in (self.AI_CACHE_ALLOWED_COMPLEXITIES or "").split(",")
+            if value.strip()
+        }
+
+    @property
+    def ai_routing_model_overrides(self) -> dict[tuple[str, str], str]:
+        """Return ``(complexity, provider) -> model`` overrides."""
+
+        overrides: dict[tuple[str, str], str] = {}
+
+        for item in (self.AI_ROUTING_MODEL_OVERRIDES or "").split(","):
+            entry = item.strip()
+
+            if not entry:
+                continue
+
+            parts = entry.split(":", 2)
+
+            if len(parts) != 3:
+                continue
+
+            complexity, provider, model = (
+                part.strip() for part in parts
+            )
+
+            if complexity and provider and model:
+                overrides[
+                    (complexity.lower(), provider.lower())
+                ] = model
+
+        return overrides
 
 # Create a shared settings object
 settings = Settings()

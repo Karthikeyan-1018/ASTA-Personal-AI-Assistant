@@ -11,6 +11,10 @@ import logging
 import re
 from dataclasses import dataclass
 
+from app.ai.tokenization import (
+    resolve_token_budget,
+    safe_estimate_tokens,
+)
 from app.context.entries import ContextEntry, ContextRequest, ContextSource
 from app.context.providers import (
     ContextProvider,
@@ -62,6 +66,14 @@ class ContextInspection:
     max_chars: int
     source_counts: dict[str, int]
     rendered_sources: tuple[str, ...]
+
+    # Phase 9 token-aware inspection fields. They are additive so existing
+    # callers keep working unchanged.
+    estimated_tokens: int | None = None
+    max_tokens: int | None = None
+    token_counting_method: str | None = None
+    trimmed_sources: tuple[str, ...] = ()
+    token_budget_enabled: bool = True
 
 
 def _normalise_content(value: str) -> str:
@@ -166,7 +178,9 @@ class UnifiedContextBuilder:
         user_message: str,
         private: bool = False,
         history: list | None = None,
-        memories: list | None = None
+        memories: list | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
 
         request = ContextRequest(
@@ -178,7 +192,11 @@ class UnifiedContextBuilder:
             memories=memories
         )
 
-        _grouped, prompt = await self._assemble(request)
+        _grouped, prompt, _trimmed = await self._assemble(
+            request,
+            provider=provider,
+            model=model,
+        )
 
         return prompt
 
@@ -189,7 +207,9 @@ class UnifiedContextBuilder:
         user_message: str,
         private: bool = False,
         history: list | None = None,
-        memories: list | None = None
+        memories: list | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> ContextInspection:
         """Return the exact assembled prompt and source summary.
 
@@ -207,7 +227,13 @@ class UnifiedContextBuilder:
             memories=memories
         )
 
-        grouped, prompt = await self._assemble(request)
+        grouped, prompt, trimmed = await self._assemble(
+            request,
+            provider=provider,
+            model=model,
+        )
+
+        budget = self._resolve_budget(provider=provider, model=model)
 
         return ContextInspection(
             user_id=user_id,
@@ -223,26 +249,58 @@ class UnifiedContextBuilder:
                 source.value
                 for source in ALL_SOURCES
                 if SECTION_HEADERS[source] in prompt
-            )
+            ),
+            estimated_tokens=safe_estimate_tokens(prompt),
+            max_tokens=budget.available if budget else None,
+            token_counting_method=budget.method if budget else None,
+            trimmed_sources=tuple(
+                source.value for source in trimmed
+            ),
+            token_budget_enabled=budget is not None,
         )
+
+    @staticmethod
+    def _resolve_budget(
+        provider: str | None = None,
+        model: str | None = None,
+    ):
+        """Return a token budget, or ``None`` when budgeting is disabled."""
+
+        if not settings.AI_TOKEN_BUDGET_ENABLED:
+            return None
+
+        try:
+            return resolve_token_budget(model=model, provider=provider)
+        except Exception:
+            logger.warning(
+                "Token budget resolution failed; using character budgets.",
+                exc_info=True,
+            )
+            return None
 
     async def _assemble(
         self,
-        request: ContextRequest
-    ) -> tuple[dict[ContextSource, list], str]:
+        request: ContextRequest,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> tuple[dict[ContextSource, list], str, tuple[ContextSource, ...]]:
         """Retrieve, deduplicate, group, and render one context request."""
 
         entries: list[ContextEntry] = []
 
-        for provider in self.providers:
+        for context_provider in self.providers:
             try:
-                provider_entries = await provider.retrieve(request)
+                provider_entries = await context_provider.retrieve(request)
 
             except Exception:
                 # A single context source must never take down chat.
                 logger.exception(
                     "Context provider %s failed; continuing without it.",
-                    getattr(provider, "source", type(provider).__name__)
+                    getattr(
+                        context_provider,
+                        "source",
+                        type(context_provider).__name__,
+                    )
                 )
                 continue
 
@@ -252,7 +310,13 @@ class UnifiedContextBuilder:
 
         grouped = self._group(unique)
 
-        return grouped, self._render_with_budget(grouped, request.query)
+        prompt, trimmed = self._render_with_budget(
+            grouped,
+            request.query,
+            budget=self._resolve_budget(provider=provider, model=model),
+        )
+
+        return grouped, prompt, trimmed
 
     @staticmethod
     def _group(entries: list[ContextEntry]) -> dict[ContextSource, list]:
@@ -317,20 +381,41 @@ class UnifiedContextBuilder:
     def _render_with_budget(
         self,
         grouped: dict[ContextSource, list],
-        user_message: str
-    ) -> str:
-        """Trim lowest-priority context until the total budget is met."""
+        user_message: str,
+        budget=None,
+    ) -> tuple[str, tuple[ContextSource, ...]]:
+        """Trim lowest-priority context until character and token budgets fit.
+
+        The current user message is never trimmed. If it alone exceeds the
+        budget, the prompt is returned as-is rather than truncated, so the
+        request cannot silently lose the user's question.
+        """
 
         prompt = self._render(grouped, user_message)
         max_chars = max(1, settings.CONTEXT_MAX_CHARS)
+        max_tokens = budget.available if budget is not None else None
 
-        if len(prompt) <= max_chars:
-            return prompt
+        def over_budget(value: str) -> bool:
+
+            if len(value) > max_chars:
+                return True
+
+            if max_tokens is None:
+                return False
+
+            estimated = safe_estimate_tokens(value)
+
+            # If counting fails, rely on the character budget.
+            return estimated is not None and estimated > max_tokens
+
+        if not over_budget(prompt):
+            return prompt, ()
 
         # Lowest priority first. The current user message is never trimmed.
         removal_order = list(reversed(_priority_order()))
+        trimmed: list[ContextSource] = []
 
-        while len(prompt) > max_chars:
+        while over_budget(prompt):
             removed = False
 
             for source in removal_order:
@@ -345,6 +430,9 @@ class UnifiedContextBuilder:
                 else:
                     values.pop()
 
+                if source not in trimmed:
+                    trimmed.append(source)
+
                 removed = True
                 break
 
@@ -353,7 +441,7 @@ class UnifiedContextBuilder:
 
             prompt = self._render(grouped, user_message)
 
-        return prompt
+        return prompt, tuple(trimmed)
 
 
 unified_context_builder = UnifiedContextBuilder()

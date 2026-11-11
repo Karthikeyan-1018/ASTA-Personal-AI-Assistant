@@ -23,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base
 
 if TYPE_CHECKING:
+    from app.models.reminder import TaskReminder
     from app.models.user import User
 
 
@@ -165,6 +166,11 @@ class Task(Base):
     )
 
     user: Mapped["User"] = relationship(back_populates="tasks")
+
+    reminders: Mapped[list["TaskReminder"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(

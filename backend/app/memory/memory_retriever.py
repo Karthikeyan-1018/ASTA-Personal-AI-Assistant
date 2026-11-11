@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.secret_patterns import SECRET_PATTERNS
 from app.exceptions.memory_exceptions import (
+    EmbeddingServiceError,
     EmbeddingValidationError,
     MemoryValidationError,
     SemanticRetrievalUnavailable,
@@ -304,6 +305,87 @@ def rank_memories(
     ]
 
 
+def _blend_retrieval_results(
+    semantic: list[RetrievedMemory],
+    keyword: list[RetrievedMemory],
+    limit: int
+) -> list[RetrievedMemory]:
+    """Combine semantic and keyword candidates into one ranked list.
+
+    The same memory may appear in both lists. Scores are blended using the
+    configured weights and deduplicated by normalised content and category.
+    """
+
+    semantic_weight = max(0.0, float(settings.AI_MEMORY_SEMANTIC_WEIGHT))
+    keyword_weight = max(0.0, float(settings.AI_MEMORY_KEYWORD_WEIGHT))
+
+    total_weight = semantic_weight + keyword_weight
+
+    if total_weight <= 0.0:
+        semantic_weight = 0.5
+        keyword_weight = 0.5
+        total_weight = 1.0
+
+    semantic_weight /= total_weight
+    keyword_weight /= total_weight
+
+    combined: dict[tuple[str, str], dict] = {}
+
+    for source, weight, items in (
+        ("semantic", semantic_weight, semantic),
+        ("keyword", keyword_weight, keyword),
+    ):
+        for item in items or []:
+            content = (item.content or "").strip()
+
+            if not content:
+                continue
+
+            key = (content.casefold(), _normalise_category(item.category))
+            entry = combined.setdefault(
+                key,
+                {
+                    "content": content,
+                    "category": item.category,
+                    "semantic": 0.0,
+                    "keyword": 0.0,
+                }
+            )
+
+            score = max(0.0, min(1.0, float(item.relevance_score or 0.0)))
+            entry[source] = max(entry[source], score)
+
+    minimum = max(0.0, min(1.0, float(settings.AI_MEMORY_MIN_HYBRID_SCORE)))
+    results: list[RetrievedMemory] = []
+
+    for entry in combined.values():
+        score = (
+            semantic_weight * entry["semantic"]
+            + keyword_weight * entry["keyword"]
+        )
+
+        if score < minimum:
+            continue
+
+        results.append(
+            RetrievedMemory(
+                content=entry["content"],
+                category=entry["category"],
+                relevance_score=round(min(score, 1.0), 4)
+            )
+        )
+
+    results.sort(
+        key=lambda item: (
+            -item.relevance_score,
+            item.content.casefold(),
+            item.category or "",
+        )
+    )
+
+    return results[:limit]
+
+
 class MemoryRetriever:
     """Retrieve the most relevant approved memories for a user's query."""
 
@@ -498,6 +580,118 @@ class MemoryRetriever:
                 category=category,
                 limit=limit
             )
+
+    async def retrieve_hybrid(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        query: str,
+        category: str | None = None,
+        limit: int = DEFAULT_RESULT_LIMIT,
+        similarity_threshold: float | None = None,
+        candidate_limit: int | None = None
+    ) -> list[RetrievedMemory]:
+        """Blend semantic and keyword retrieval results.
+
+        Semantic candidates supply conceptual matches while keyword
+        candidates preserve deterministic, exact-term matches. Results are
+        deduplicated by content and category, and only approved memories can
+        be returned because both underlying paths enforce the approved-only
+        rule.
+
+        Semantic unavailability falls back to keyword retrieval. Unexpected
+        database failures are allowed to propagate so the caller can keep chat
+        available while logging the failure without exposing memory content.
+        """
+
+        cleaned_query, limit, _normalised_filter = self._validate_request(
+            query=query,
+            limit=limit,
+            category=category
+        )
+
+        if not settings.SEMANTIC_RETRIEVAL_ENABLED:
+            return await self.retrieve(
+                session=session,
+                user_id=user_id,
+                query=query,
+                category=category,
+                limit=limit
+            )
+
+        configured_candidates = candidate_limit
+        if configured_candidates is None:
+            configured_candidates = settings.AI_MEMORY_CANDIDATE_LIMIT
+
+        try:
+            configured_candidates = int(configured_candidates)
+        except (TypeError, ValueError):
+            configured_candidates = limit
+
+        candidate_limit = min(
+            MAX_RESULT_LIMIT,
+            max(limit, configured_candidates)
+        )
+
+        try:
+            semantic = await self.retrieve(
+                session=session,
+                user_id=user_id,
+                query=query,
+                category=category,
+                limit=candidate_limit,
+                mode=RetrievalMode.SEMANTIC,
+                similarity_threshold=similarity_threshold,
+                allow_keyword_fallback=False
+            )
+
+        except MemoryValidationError:
+            raise
+
+        except (
+            SemanticRetrievalUnavailable,
+            EmbeddingServiceError,
+        ):
+            logger.info(
+                "Semantic memory retrieval unavailable; using keyword "
+                "retrieval."
+            )
+
+            return await self.retrieve(
+                session=session,
+                user_id=user_id,
+                query=query,
+                category=category,
+                limit=limit
+            )
+
+        try:
+            keyword = await self.retrieve(
+                session=session,
+                user_id=user_id,
+                query=query,
+                category=category,
+                limit=candidate_limit,
+                mode=RetrievalMode.KEYWORD
+            )
+
+        except MemoryValidationError:
+            raise
+
+        except Exception:
+            # Semantic results are still usable. Keyword ranking is additive.
+            logger.warning(
+                "Keyword memory retrieval failed during hybrid retrieval; "
+                "using semantic results only.",
+                exc_info=True
+            )
+            keyword = []
+
+        return _blend_retrieval_results(
+            semantic=semantic,
+            keyword=keyword,
+            limit=limit
+        )
 
     async def _retrieve_semantic_pgvector(
         self,

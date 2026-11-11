@@ -15,6 +15,51 @@ from app.exceptions.llm_exceptions import (
 logger = logging.getLogger(__name__)
 
 
+def _as_positive_int(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    return number if number >= 0 else None
+
+
+def _extract_usage(response) -> dict | None:
+    """Return provider-reported token counts, or ``None`` when absent.
+
+    Only numeric counts are stored. Response text is never copied here.
+    """
+
+    usage = getattr(response, "usage", None)
+
+    if usage is None:
+        return None
+
+    input_tokens = _as_positive_int(
+        getattr(usage, "prompt_tokens", None)
+    )
+    output_tokens = _as_positive_int(
+        getattr(usage, "completion_tokens", None)
+    )
+    total_tokens = _as_positive_int(
+        getattr(usage, "total_tokens", None)
+    )
+
+    if (
+        input_tokens is None
+        and output_tokens is None
+        and total_tokens is None
+    ):
+        return None
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "source": "provider",
+    }
+
+
 class GroqProvider:
 
     def __init__(self):
@@ -26,12 +71,23 @@ class GroqProvider:
 
         self.model = settings.GROQ_MODEL
 
-    async def generate_response(self, prompt: str) -> str:
+        # Populated after a successful call when the SDK reports token usage.
+        # It contains counts only, never prompt or response content.
+        self.last_usage = None
+
+    async def generate_response(
+        self,
+        prompt: str,
+        model: str | None = None
+    ) -> str:
+
+        self.last_usage = None
+        target_model = model or self.model
 
         try:
 
             response = await self.client.chat.completions.create(
-                model=self.model,
+                model=target_model,
                 messages=[
                     {
                         "role": "user",
@@ -39,6 +95,8 @@ class GroqProvider:
                     }
                 ]
             )
+
+            self.last_usage = _extract_usage(response)
 
             return response.choices[0].message.content
 

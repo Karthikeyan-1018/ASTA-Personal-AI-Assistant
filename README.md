@@ -6,18 +6,27 @@ long-term memory.
 
 ## Current capabilities
 
-- Hybrid LLM routing: Groq first, Ollama fallback.
-- Private requests are routed to local Ollama only.
-- Approved long-term memories with keyword or semantic retrieval.
+- Hybrid LLM routing: Groq first, Ollama fallback, with optional complexity-aware and cost-aware policies.
+- Private requests are routed to local Ollama only, regardless of routing policy.
+- Approved long-term memories with keyword, semantic, or hybrid retrieval.
 - Memory-aware chat prompts.
+- Token-aware context budgeting that trims low-priority sources before a prompt exceeds a model's window.
+- Deterministic query classification for routing and cache eligibility, with an optional disabled-by-default LLM fallback.
+- Conservative semantic response cache for stateless, non-private, non-sensitive requests.
+- Metadata-only AI usage and performance tracking (tokens, latency, fallback, cache hits, optional cost).
 - Persistent conversations and messages in PostgreSQL.
 - Conversation CRUD, paginated message history, and resumable chats.
 - Structured user preferences with explicit CRUD and inferred suggestions.
 - Structured tasks with categories, priorities, lifecycle status, and deadlines.
+- Task-scoped reminders with deadline-relative or absolute times, owner-scoped CRUD, and duplicate prevention.
+- Database-backed reminder scheduler with atomic claims, bounded retries, restart recovery, and graceful shutdown.
+- In-app notification history with read state that survives task and reminder deletion.
+- Notification preferences with timezone-aware quiet hours that defer rather than discard reminders.
+- Finite recurring tasks (daily, weekly, monthly) with custom weekdays, intervals, occurrence links, and duplicate prevention.
 - Natural-language task management with confirmation-gated mutations.
 - Timezone-aware deadline views (overdue, today, tomorrow, upcoming).
 - Unified context assembly from preferences, memories, tasks, deadlines, and bounded history.
-- Per-user ownership checks on every conversation, message, preference, and task query.
+- Per-user ownership checks on every conversation, message, preference, task, usage, and AI cache query.
 - Single-owner authentication with Argon2id passwords, revocable cookie sessions, and CSRF protection.
 - Database-backed, progressive login rate limiting that survives backend restarts.
 - Configurable trusted hosts and explicit CORS origins for laptop and phone access on a private LAN.
@@ -97,6 +106,55 @@ separate and are subject to the unified context budget.
 See [docs/task_and_deadline_management.md](docs/task_and_deadline_management.md)
 for the model, lifecycle, deadline semantics, API examples, and configuration.
 
+### Task reminders, notifications, and recurrence
+
+Phase 10A added task-scoped reminders. A reminder always belongs to an existing
+task and owner. It can be expressed as a positive offset before the deadline or
+as an explicit timezone-aware instant; the resolved scheduling time is stored
+in UTC. Multiple distinct reminders may belong to one task.
+
+For timed tasks, an offset is measured from the exact deadline. For date-only
+tasks, the anchor is `REMINDER_DEFAULT_LOCAL_TIME` (09:00 by default) on the
+due date in the task's IANA timezone, so a one-day reminder means 09:00 the
+previous day rather than the end of the due date. Creating, rescheduling,
+cancelling, and deleting reminders all enforce task ownership.
+
+Phase 10B–10F complete the delivery pipeline:
+
+- **Scheduler.** An in-process background loop claims due reminders from
+  PostgreSQL with `SELECT FOR UPDATE SKIP LOCKED` where available, records a
+  claim token and lease, and only marks a reminder delivered after the delivery
+  handler commits successfully. Abandoned claims are recovered after the lease
+  expires; failures use bounded exponential backoff up to
+  `REMINDER_MAX_ATTEMPTS`. Work is database-backed, so restarts resume safely,
+  and shutdown waits for the in-flight cycle.
+- **In-app notifications.** Delivery persists one notification per reminder
+  using a unique `(user_id, dedupe_key)` key. Notifications snapshot the title
+  and body and reference the task and reminder with `ON DELETE SET NULL`, so
+  history survives task deletion. Read/unread state is owner-scoped.
+- **Recurrence.** A rule on an owned open task generates independent occurrence
+  tasks for daily, weekly (with custom weekdays), or monthly cadences, with
+  intervals, optional start/end dates, and the task's timezone and wall-clock
+  time. Generation is finite and bounded by the end date, horizon, and per-run
+  cap. A unique `(recurrence_id, occurrence_date)` constraint prevents
+  duplicates. Deactivating a rule stops future generation and preserves all
+  existing tasks and history.
+- **Preferences and quiet hours.** Owners can disable in-app notifications or
+  set quiet hours. Quiet hours use wall-clock start/end times plus an IANA
+  timezone, support windows that cross midnight, and handle daylight-saving
+  transitions. A reminder that falls inside the window is deferred until the
+  window ends, never silently discarded.
+
+Notification history is retained for `NOTIFICATION_RETENTION_DAYS`; only read
+notifications older than the cutoff are purged, and `0` disables purging.
+Email, SMS, and push channels are out of scope. Natural-language reminder
+scheduling is intentionally deferred; the existing task-intent engine still
+treats “remind me to…” as a task request.
+
+See [docs/reminders_and_notifications.md](docs/reminders_and_notifications.md)
+for the schema, scheduling and retry semantics, recurrence rules, quiet hours,
+API examples, configuration, and limitations.
+
 ## Natural-language task management
 
 Chat can understand task requests such as "Remind me to call mom tomorrow",
@@ -123,12 +181,41 @@ Chat assembles one prompt from six sources: the current message, bounded
 conversation history, active preferences, approved memories, relevant open
 tasks, and relevant deadlines. Sources are filtered for relevance and ownership,
 de-duplicated, kept in separate untrusted blocks, and trimmed against per-section
-and global character budgets. Private requests use Ollama only and exclude stored
+and global character budgets. Phase 9 also enforces a per-model token budget, so
+the lowest-priority sources are removed before the prompt can exceed the selected
+provider's context window. Private requests use Ollama only and exclude stored
 task/deadline context.
 
 See [docs/context_architecture.md](docs/context_architecture.md) for the full
 retrieval flow, relevance rules, priority ordering, budgets, privacy guarantees,
 failure handling, and example assembly.
+
+## AI optimization and cost control
+
+Phase 9 adds a conservative optimization layer in front of the existing
+provider router and context builder:
+
+- Deterministic query classification (`simple`, `moderate`, `complex`,
+  `dynamic_information`, `task_action`, `private`) drives routing and cache
+  eligibility. Classification is an optimization hint only; it never authorizes
+  a mutation or changes ownership checks.
+- Routing policies (`groq_first`, `local_first`, `cost_aware`) select the primary
+  provider and fallback. Private requests are always Ollama-only and never touch
+  a cloud provider, including on health checks and failure paths.
+- The semantic response cache only considers stateless, non-private,
+  non-sensitive, non-dynamic eligible requests with no rendered context. It is
+  user-scoped, TTL-bound, and versioned; PostgreSQL/pgvector adds cosine
+  similarity, while SQLite uses exact query-hash matching.
+- Usage records store tokens, latency, provider/model, fallback and cache flags,
+  and optional configured cost. They never contain prompt text, response text,
+  credentials, or provider error details.
+- Hybrid memory retrieval blends semantic and keyword scores, de-duplicates
+  results, keeps the approved-only rule, and falls back to keyword retrieval when
+  semantic storage is unavailable.
+
+See [docs/ai_optimization.md](docs/ai_optimization.md) for routing policies,
+classification rules, cache eligibility, usage tracking, hybrid retrieval,
+privacy guarantees, configuration, and the Phase 9 migration.
 
 ## Authentication and local-network access
 
@@ -198,9 +285,32 @@ Windows Firewall rules, the future frontend contract, and security limitations.
 | `GET` | `/api/tasks/completed` | Completed tasks |
 | `GET` | `/api/tasks/pending` | Pending tasks |
 | `GET` | `/api/tasks/in-progress` | In-progress tasks |
+| `POST` | `/api/tasks/{id}/reminders` | Create a task reminder |
+| `GET` | `/api/tasks/{id}/reminders` | List reminders for one task |
+| `GET` | `/api/reminders` | List the owner's reminders across tasks |
+| `PATCH` | `/api/reminders/{id}` | Reschedule a pending reminder |
+| `POST` | `/api/reminders/{id}/cancel` | Cancel a pending reminder |
+| `DELETE` | `/api/reminders/{id}` | Delete a reminder |
+| `GET` | `/api/notifications` | List notification history (newest first) |
+| `GET` | `/api/notifications/unread` | List unread notifications |
+| `GET` | `/api/notifications/{id}` | Retrieve one notification |
+| `PATCH` | `/api/notifications/{id}/read` | Mark one notification as read |
+| `POST` | `/api/notifications/read-all` | Mark every unread notification as read |
+| `DELETE` | `/api/notifications/{id}` | Delete one notification |
+| `GET` | `/api/notifications/preferences` | Read effective notification preferences |
+| `PATCH` | `/api/notifications/preferences` | Update notifications and quiet hours |
+| `POST` | `/api/tasks/{id}/recurrence` | Create a recurrence rule for an owned open task |
+| `GET` | `/api/tasks/{id}/recurrence` | Read one task's recurrence rule |
+| `GET` | `/api/recurrences` | List the owner's recurrence rules |
+| `GET` | `/api/recurrences/{id}` | Retrieve one recurrence rule |
+| `PATCH` | `/api/recurrences/{id}` | Update a recurrence rule |
+| `DELETE` | `/api/recurrences/{id}` | Deactivate a rule (history is preserved) |
+| `GET` | `/api/recurrences/{id}/occurrences` | List generated occurrence links |
 | `GET` | `/api/task-actions/pending` | List active task-action confirmations |
 | `POST` | `/api/task-actions/{id}/confirm` | Confirm and execute a pending action |
 | `POST` | `/api/task-actions/{id}/reject` | Reject a pending action |
+| `GET` | `/api/ai/usage/summary` | Aggregated AI usage and performance for the owner |
+| `GET` | `/api/ai/usage/recent` | Recent metadata-only AI usage rows for the owner |
 
 All endpoints above except `POST /api/auth/login` and the one-time
 `POST /api/auth/setup` require a valid session. State-changing requests must
@@ -223,7 +333,7 @@ CONTEXT_MEMORY_SECTION_CHARS=5000
 CONTEXT_HISTORY_SECTION_CHARS=6000
 CONTEXT_TASK_SECTION_CHARS=2000
 CONTEXT_DEADLINE_SECTION_CHARS=2000
-CONTEXT_PRIORITY_ORDER=history,preference,memory,task,deadline
+CONTEXT_PRIORITY_ORDER=history,task,deadline,preference,memory
 TASK_DEFAULT_UPCOMING_DAYS=7
 TASK_CONTEXT_UPCOMING_DAYS=7
 TASK_CONTEXT_LIMIT=5
@@ -233,6 +343,31 @@ TASK_INTENT_LLM_ENABLED=true
 TASK_ACTION_CONFIRMATION_TTL_SECONDS=600
 TASK_DEFAULT_TIMEZONE=
 TASK_INTENT_MAX_RESULTS=20
+REMINDER_DEFAULT_LOCAL_TIME=09:00
+
+# Reminder scheduler, notifications, and recurrence (Phase 10)
+REMINDER_SCHEDULER_ENABLED=true
+REMINDER_SCHEDULER_POLL_SECONDS=30
+REMINDER_SCHEDULER_BATCH_SIZE=25
+REMINDER_PROCESSING_LEASE_SECONDS=300
+REMINDER_MAX_ATTEMPTS=5
+REMINDER_RETRY_BACKOFF_SECONDS=60
+REMINDER_RETRY_BACKOFF_MULTIPLIER=2
+REMINDER_RETRY_BACKOFF_MAX_SECONDS=3600
+REMINDER_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS=10
+NOTIFICATION_RETENTION_DAYS=365
+NOTIFICATION_MAX_ATTEMPTS=5
+NOTIFICATION_QUIET_HOURS_DEFAULT_ENABLED=false
+NOTIFICATION_QUIET_HOURS_DEFAULT_START=22:00
+NOTIFICATION_QUIET_HOURS_DEFAULT_END=07:00
+NOTIFICATION_QUIET_HOURS_DEFAULT_TIMEZONE=UTC
+RECURRENCE_GENERATION_ENABLED=true
+RECURRENCE_GENERATION_HORIZON_DAYS=30
+RECURRENCE_GENERATION_BATCH_SIZE=25
+RECURRENCE_MAX_GENERATIONS_PER_RUN=10
+RECURRENCE_GENERATION_INTERVAL_SECONDS=3600
+RECURRENCE_RETRY_BACKOFF_SECONDS=300
+RECURRENCE_PROCESSING_LEASE_SECONDS=300
 
 # Single-owner authentication
 AUTH_OWNER_SETUP_TOKEN=
@@ -258,6 +393,46 @@ AUTH_LOGIN_COOLDOWN_MULTIPLIER=2
 AUTH_LOGIN_MAX_COOLDOWN_MINUTES=1440
 AUTH_LOGIN_ATTEMPT_RETENTION_HOURS=48
 AUTH_TRUSTED_PROXIES=
+
+# AI optimization (Phase 9)
+AI_TOKEN_BUDGET_ENABLED=true
+AI_CHARS_PER_TOKEN=4.0
+AI_DEFAULT_CONTEXT_WINDOW_TOKENS=8192
+AI_GROQ_CONTEXT_WINDOW_TOKENS=131072
+AI_OLLAMA_CONTEXT_WINDOW_TOKENS=40960
+AI_MODEL_CONTEXT_WINDOWS=
+AI_RESPONSE_RESERVE_TOKENS=1024
+AI_CONTEXT_SAFETY_TOKENS=256
+AI_QUERY_CLASSIFIER_ENABLED=true
+AI_QUERY_CLASSIFIER_LLM_FALLBACK_ENABLED=false
+AI_QUERY_CLASSIFIER_LLM_FALLBACK_THRESHOLD=0.6
+AI_ROUTING_POLICY=groq_first
+AI_ROUTING_SIMPLE_PROVIDER=ollama
+AI_ROUTING_MODERATE_PROVIDER=groq
+AI_ROUTING_COMPLEX_PROVIDER=groq
+AI_ROUTING_DYNAMIC_PROVIDER=groq
+AI_ROUTING_MODEL_OVERRIDES=
+AI_GROQ_INPUT_COST_PER_MILLION=0
+AI_GROQ_OUTPUT_COST_PER_MILLION=0
+AI_OLLAMA_INPUT_COST_PER_MILLION=0
+AI_OLLAMA_OUTPUT_COST_PER_MILLION=0
+AI_CACHE_ENABLED=true
+AI_CACHE_SIMILARITY_THRESHOLD=0.95
+AI_CACHE_TTL_SECONDS=3600
+AI_CACHE_MAX_ENTRIES_PER_USER=500
+AI_CACHE_PROMPT_VERSION=phase9-v1
+AI_CACHE_CONFIG_VERSION=1
+AI_CACHE_ALLOWED_COMPLEXITIES=simple,moderate
+AI_CACHE_STATELESS_ONLY=true
+AI_CACHE_SEMANTIC_ENABLED=true
+AI_USAGE_TRACKING_ENABLED=true
+AI_USAGE_RETENTION_DAYS=90
+AI_USAGE_RECENT_LIMIT=50
+AI_MEMORY_HYBRID_ENABLED=true
+AI_MEMORY_SEMANTIC_WEIGHT=0.7
+AI_MEMORY_KEYWORD_WEIGHT=0.3
+AI_MEMORY_CANDIDATE_LIMIT=20
+AI_MEMORY_MIN_HYBRID_SCORE=0.05
 
 # Explicit frontend origins (empty for same-origin) and Host allowlist
 CORS_ALLOWED_ORIGINS=
@@ -305,4 +480,22 @@ cd backend
 ..\venv\Scripts\python.exe -m unittest tests.test_phase81_dependencies tests.test_phase81_rate_limit -v
 ..\venv\Scripts\python.exe scripts\verify_phase81_dependencies.py
 ..\venv\Scripts\python.exe scripts\verify_phase81_rate_limit.py
+```
+
+Phase 9 focused AI optimization checks (token budgets, classification, routing,
+cache, usage tracking, hybrid memory retrieval, and chat cache integration):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase9_token_budget tests.test_phase9_query_classifier tests.test_phase9_routing tests.test_phase9_cache tests.test_phase9_usage tests.test_phase9_usage_api tests.test_phase9_hybrid_retrieval tests.test_phase9_chat_integration -v
+```
+
+All Phase 9 tests mock Groq and Ollama; no real provider call is made.
+
+Phase 10A reminder checks (model, CRUD, ownership, scheduling, timezone
+anchoring, duplicate prevention, and cascade deletion):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase10_reminders -v
 ```
