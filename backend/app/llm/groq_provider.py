@@ -9,6 +9,12 @@ from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
 )
+from app.llm.tool_calling import (
+    ProviderToolTurn,
+    extract_groq_tool_calls,
+    to_groq_messages,
+    to_groq_tools,
+)
 
 
 # Configure logging
@@ -142,6 +148,99 @@ class GroqProvider:
 
             logger.exception(
                 "Unexpected Groq provider error."
+            )
+
+            raise LLMProviderError(
+                "Groq provider failed unexpectedly."
+            ) from error
+
+    async def generate_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+    ) -> ProviderToolTurn:
+        """Run one chat completion turn that may request tool calls."""
+
+        self.last_usage = None
+        target_model = model or self.model
+
+        # Registry definitions are provider-independent. Convert them once at
+        # the provider boundary so a malformed definition can never reach the
+        # SDK request.
+        provider_tools = to_groq_tools(tools)
+
+        kwargs: dict = {
+            "model": target_model,
+            "messages": to_groq_messages(messages),
+        }
+
+        if provider_tools:
+            kwargs["tools"] = provider_tools
+            kwargs["tool_choice"] = "auto"
+
+        try:
+
+            response = await self.client.chat.completions.create(**kwargs)
+
+            self.last_usage = _extract_usage(response)
+
+            choices = getattr(response, "choices", None)
+
+            if not choices:
+                raise LLMProviderError("Groq returned no response choices.")
+
+            message = choices[0].message
+            content = getattr(message, "content", None) or ""
+
+            return ProviderToolTurn(
+                content=content,
+                tool_calls=extract_groq_tool_calls(message),
+                usage=self.last_usage,
+                model=target_model,
+            )
+
+        except LLMProviderError:
+            raise
+
+        except (APITimeoutError, httpx.TimeoutException) as error:
+
+            logger.warning(
+                "Groq tool-calling request timed out after %s seconds.",
+                settings.GROQ_TIMEOUT_SECONDS,
+            )
+
+            raise LLMTimeoutError(
+                "Groq request timed out."
+            ) from error
+
+        except GroqError as error:
+
+            logger.error(
+                "Groq tool-calling error (%s), status code: %s",
+                type(error).__name__,
+                getattr(error, "status_code", "unknown"),
+            )
+
+            raise LLMProviderError(
+                "Groq provider request failed."
+            ) from error
+
+        except httpx.HTTPError as error:
+
+            logger.error(
+                "Groq HTTP error during tool calling: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Groq provider connection failed."
+            ) from error
+
+        except Exception as error:
+
+            logger.exception(
+                "Unexpected Groq tool-calling error."
             )
 
             raise LLMProviderError(

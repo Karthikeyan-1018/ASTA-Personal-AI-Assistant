@@ -10,6 +10,12 @@ from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
 )
+from app.llm.tool_calling import (
+    ProviderToolTurn,
+    extract_ollama_tool_calls,
+    to_ollama_messages,
+    to_ollama_tools,
+)
 
 
 # Configure logging
@@ -147,6 +153,91 @@ class OllamaProvider:
 
             logger.exception(
                 "Unexpected Ollama provider error."
+            )
+
+            raise LLMProviderError(
+                "Ollama provider failed unexpectedly."
+            ) from error
+
+    async def generate_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+    ) -> ProviderToolTurn:
+        """Run one chat turn with tool definitions using Ollama's format."""
+
+        self.last_usage = None
+        target_model = model or self.model
+
+        # Sanitize registry definitions before they reach the Ollama client.
+        provider_tools = to_ollama_tools(tools)
+
+        kwargs: dict = {
+            "model": target_model,
+            "messages": to_ollama_messages(messages),
+            "options": {"num_ctx": settings.OLLAMA_NUM_CTX},
+        }
+
+        if provider_tools:
+            kwargs["tools"] = provider_tools
+
+        try:
+
+            response = await asyncio.wait_for(
+                self.client.chat(**kwargs),
+                timeout=settings.OLLAMA_TIMEOUT_SECONDS,
+            )
+
+            self.last_usage = _extract_usage(response)
+
+            message = _field(response, "message")
+            content = _field(message, "content") or ""
+
+            return ProviderToolTurn(
+                content=content,
+                tool_calls=extract_ollama_tool_calls(message),
+                usage=self.last_usage,
+                model=target_model,
+            )
+
+        except (asyncio.TimeoutError, httpx.TimeoutException) as error:
+
+            logger.warning(
+                "Ollama tool-calling request timed out after %s seconds.",
+                settings.OLLAMA_TIMEOUT_SECONDS,
+            )
+
+            raise LLMTimeoutError(
+                "Ollama request timed out."
+            ) from error
+
+        except (ollama.ResponseError, ollama.RequestError) as error:
+
+            logger.error(
+                "Ollama tool-calling error: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Ollama provider request failed."
+            ) from error
+
+        except (ConnectionError, httpx.HTTPError) as error:
+
+            logger.error(
+                "Ollama connection error during tool calling: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Ollama provider connection failed."
+            ) from error
+
+        except Exception as error:
+
+            logger.exception(
+                "Unexpected Ollama tool-calling error."
             )
 
             raise LLMProviderError(

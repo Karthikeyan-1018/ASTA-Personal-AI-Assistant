@@ -21,9 +21,13 @@ long-term memory.
 - Task-scoped reminders with deadline-relative or absolute times, owner-scoped CRUD, and duplicate prevention.
 - Database-backed reminder scheduler with atomic claims, bounded retries, restart recovery, and graceful shutdown.
 - In-app notification history with read state that survives task and reminder deletion.
+- Notification snoozing that re-arms the existing reminder without duplicating notifications.
+- Reminder rescheduling with duplicate prevention and concurrency-safe lifecycle checks.
 - Notification preferences with timezone-aware quiet hours that defer rather than discard reminders.
 - Finite recurring tasks (daily, weekly, monthly) with custom weekdays, intervals, occurrence links, and duplicate prevention.
 - Natural-language task management with confirmation-gated mutations.
+- Central tool registry with validated metadata, input/output schemas, duplicate prevention, discovery, and enabled/disabled views (Phase 11A).
+- Provider-specific LLM function calling for Groq and Ollama, with normalized tool-call parsing, safe malformed-response handling, and text-only fallback (Phase 11B).
 - Timezone-aware deadline views (overdue, today, tomorrow, upcoming).
 - Unified context assembly from preferences, memories, tasks, deadlines, and bounded history.
 - Per-user ownership checks on every conversation, message, preference, task, usage, and AI cache query.
@@ -119,7 +123,7 @@ due date in the task's IANA timezone, so a one-day reminder means 09:00 the
 previous day rather than the end of the due date. Creating, rescheduling,
 cancelling, and deleting reminders all enforce task ownership.
 
-Phase 10B–10F complete the delivery pipeline:
+Phase 10B–10H complete the delivery pipeline:
 
 - **Scheduler.** An in-process background loop claims due reminders from
   PostgreSQL with `SELECT FOR UPDATE SKIP LOCKED` where available, records a
@@ -144,6 +148,13 @@ Phase 10B–10F complete the delivery pipeline:
   timezone, support windows that cross midnight, and handle daylight-saving
   transitions. A reminder that falls inside the window is deferred until the
   window ends, never silently discarded.
+- **Snooze and reschedule.** A delivered notification can be snoozed for a
+  duration (for example 10, 30, or 60 minutes, or 1440 for "tomorrow") or until a
+  custom timezone-aware instant. Snoozing marks the notification read, records
+  audit metadata, and re-arms the existing reminder; the same notification row
+  becomes unread again on re-delivery. Pending reminders can be rescheduled.
+  Both operations are owner-scoped, reject past or duplicate instants, respect
+  quiet hours, and use row locking so a scheduler claim cannot race a change.
 
 Notification history is retained for `NOTIFICATION_RETENTION_DAYS`; only read
 notifications older than the cutoff are purged, and `0` disables purging.
@@ -216,6 +227,48 @@ provider router and context builder:
 See [docs/ai_optimization.md](docs/ai_optimization.md) for routing policies,
 classification rules, cache eligibility, usage tracking, hybrid retrieval,
 privacy guarantees, configuration, and the Phase 9 migration.
+
+## Tool registry
+
+Phase 11A adds a central, in-process registry for function-calling tools. A
+tool declares a unique name, description, category, Pydantic input model,
+optional output schema, and permission metadata. The registry validates every
+definition, prevents duplicates, supports atomic batch registration, and
+exposes discovery APIs for listing tools, resolving one by name, and viewing
+enabled or disabled tools.
+
+Definitions are provider-independent until `llm_definitions()` converts the
+currently allowed set into OpenAI/Ollama-compatible function schemas. Phase 11A
+does not execute tools or add database tables. Phase 11B parses provider
+tool-call responses; execution and confirmations remain in Phase 11C.
+
+See [docs/tool_registry.md](docs/tool_registry.md) for the architecture,
+`BaseTool` contract, schema and permission metadata, discovery flow, lazy
+built-in loading, and Phase 11B/11C integration points.
+
+## LLM function calling
+
+Phase 11B connects the tool registry to the hybrid Groq + Ollama router. The
+model can request a registered tool by name and JSON arguments, but nothing is
+executed at this layer. Registry definitions are converted at the provider
+boundary into the canonical function schema both providers accept: Groq uses
+`tools` with `tool_choice="auto"`, while Ollama uses its native `tools`
+parameter.
+
+Responses are normalized into a `ProviderToolTurn` with assistant text and
+`NormalizedToolCall` entries. Malformed JSON, non-object arguments, missing
+names, duplicate ids, unsupported response shapes, and oversized payloads are
+reported as structured errors instead of raising, so the assistant can recover.
+Valid calls also convert to the public `ToolCall` schema for Phase 11C.
+
+Routing behavior is unchanged: non-private requests follow the configured
+policy and fallback order, private requests stay Ollama-only, and text-only
+responses are returned exactly as before. Phase 11B does not execute tools,
+authorize actions, or touch the database.
+
+See [docs/tool_calling.md](docs/tool_calling.md) for provider formats, parsing
+rules, message translation, router behavior, limits, and the Phase 11C
+boundary.
 
 ## Authentication and local-network access
 
@@ -295,6 +348,7 @@ Windows Firewall rules, the future frontend contract, and security limitations.
 | `GET` | `/api/notifications/unread` | List unread notifications |
 | `GET` | `/api/notifications/{id}` | Retrieve one notification |
 | `PATCH` | `/api/notifications/{id}/read` | Mark one notification as read |
+| `POST` | `/api/notifications/{id}/snooze` | Snooze a delivered notification |
 | `POST` | `/api/notifications/read-all` | Mark every unread notification as read |
 | `DELETE` | `/api/notifications/{id}` | Delete one notification |
 | `GET` | `/api/notifications/preferences` | Read effective notification preferences |
@@ -357,6 +411,8 @@ REMINDER_RETRY_BACKOFF_MAX_SECONDS=3600
 REMINDER_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS=10
 NOTIFICATION_RETENTION_DAYS=365
 NOTIFICATION_MAX_ATTEMPTS=5
+NOTIFICATION_SNOOZE_MAX_COUNT=10
+NOTIFICATION_MAX_SNOOZE_MINUTES=525600
 NOTIFICATION_QUIET_HOURS_DEFAULT_ENABLED=false
 NOTIFICATION_QUIET_HOURS_DEFAULT_START=22:00
 NOTIFICATION_QUIET_HOURS_DEFAULT_END=07:00
@@ -498,4 +554,36 @@ anchoring, duplicate prevention, and cascade deletion):
 ```powershell
 cd backend
 ..\venv\Scripts\python.exe -m unittest tests.test_phase10_reminders -v
+```
+
+Phase 11A tool registry and `BaseTool` checks:
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11a_base tests.test_phase11a_registry -v
+```
+
+Phase 11B provider function-calling and router checks (mocked SDK responses; no
+real provider call):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11b_tool_calling -v
+```
+
+Phase 10B–10H scheduler, notification, recurrence, preference, integration,
+snooze, and reschedule checks:
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase10_scheduler_notifications tests.test_phase10_recurrence tests.test_phase10_reliability tests.test_phase10_preferences tests.test_phase10_integration tests.test_phase10_snooze_reschedule -v
+```
+
+Real PostgreSQL locking and concurrency checks are opt-in and use only
+temporary rows in `asta_db`:
+
+```powershell
+cd backend
+$env:ASTA_PHASE10_POSTGRES_TESTS="1"
+..\venv\Scripts\python.exe -m unittest tests.test_phase10_snooze_postgres -v
 ```

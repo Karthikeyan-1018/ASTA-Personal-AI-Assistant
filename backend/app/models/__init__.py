@@ -35,6 +35,7 @@ from app.models.task_action import (
     PendingActionType,
     TaskPendingAction,
 )
+from app.models.tool_execution import ToolConfirmation, ToolExecution
 from app.models.user import User
 
 __all__ = [
@@ -69,4 +70,6 @@ __all__ = [
     "TaskPendingAction",
     "PendingActionType",
     "PendingActionStatus",
+    "ToolConfirmation",
+    "ToolExecution",
 ]

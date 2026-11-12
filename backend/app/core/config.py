@@ -233,6 +233,17 @@ class Settings:
         os.getenv("NOTIFICATION_MAX_ATTEMPTS", "5")
     )
 
+    # Snoozing re-arms the reminder that produced a notification. The counter is
+    # cumulative per notification; a value of 0 or less means unlimited snoozes.
+    NOTIFICATION_SNOOZE_MAX_COUNT: int = int(
+        os.getenv("NOTIFICATION_SNOOZE_MAX_COUNT", "10")
+    )
+
+    # Upper bound for a single snooze or custom snooze instant (365 days).
+    NOTIFICATION_MAX_SNOOZE_MINUTES: int = int(
+        os.getenv("NOTIFICATION_MAX_SNOOZE_MINUTES", "525600")
+    )
+
     # ------------------------------------------------------------------
     # Phase 10D recurring tasks
     # ------------------------------------------------------------------
@@ -665,6 +676,220 @@ class Settings:
     AI_MEMORY_MIN_HYBRID_SCORE: float = float(
         os.getenv("AI_MEMORY_MIN_HYBRID_SCORE", "0.05")
     )
+
+    # ------------------------------------------------------------------
+    # Phase 11 function calling and tool execution
+    # ------------------------------------------------------------------
+
+    # Chat tool-calling is opt-in. The registry, executor, and API remain
+    # available when disabled, but the normal chat path is unchanged.
+    TOOL_CALLING_ENABLED: bool = (
+        os.getenv("TOOL_CALLING_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_MAX_CALLS_PER_REQUEST: int = int(
+        os.getenv("TOOL_MAX_CALLS_PER_REQUEST", "5")
+    )
+
+    # One initial provider turn plus one final response turn. This bound
+    # prevents a model from looping indefinitely.
+    TOOL_MAX_ROUNDS: int = int(
+        os.getenv("TOOL_MAX_ROUNDS", "2")
+    )
+
+    TOOL_EXECUTION_TIMEOUT_SECONDS: int = int(
+        os.getenv("TOOL_EXECUTION_TIMEOUT_SECONDS", "15")
+    )
+
+    TOOL_MAX_ARGUMENT_BYTES: int = int(
+        os.getenv("TOOL_MAX_ARGUMENT_BYTES", "16384")
+    )
+
+    TOOL_MAX_RESULT_BYTES: int = int(
+        os.getenv("TOOL_MAX_RESULT_BYTES", "20000")
+    )
+
+    TOOL_CONFIRMATION_TTL_SECONDS: int = int(
+        os.getenv("TOOL_CONFIRMATION_TTL_SECONDS", "600")
+    )
+
+    TOOL_CONFIRMATION_MAX_PENDING: int = int(
+        os.getenv("TOOL_CONFIRMATION_MAX_PENDING", "10")
+    )
+
+    TOOL_EXECUTION_RETENTION_DAYS: int = int(
+        os.getenv("TOOL_EXECUTION_RETENTION_DAYS", "90")
+    )
+
+    TOOL_HISTORY_ENABLED: bool = (
+        os.getenv("TOOL_HISTORY_ENABLED", "true").lower() == "true"
+    )
+
+    # Sensitive tools (arbitrary HTTP mutations, Python execution, future
+    # destructive filesystem operations) are denied unless this is enabled.
+    TOOL_ALLOW_SENSITIVE: bool = (
+        os.getenv("TOOL_ALLOW_SENSITIVE", "false").lower() == "true"
+    )
+
+    # Web search. The provider credential never leaves the server.
+    WEB_SEARCH_ENABLED: bool = (
+        os.getenv("WEB_SEARCH_ENABLED", "false").lower() == "true"
+    )
+
+    WEB_SEARCH_PROVIDER: str = os.getenv(
+        "WEB_SEARCH_PROVIDER",
+        "searxng"
+    ).strip().lower()
+
+    WEB_SEARCH_BASE_URL: str = os.getenv(
+        "WEB_SEARCH_BASE_URL",
+        ""
+    ).strip()
+
+    WEB_SEARCH_API_KEY: str = os.getenv(
+        "WEB_SEARCH_API_KEY",
+        ""
+    )
+
+    WEB_SEARCH_TIMEOUT_SECONDS: int = int(
+        os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "10")
+    )
+
+    WEB_SEARCH_MAX_RESULTS: int = int(
+        os.getenv("WEB_SEARCH_MAX_RESULTS", "5")
+    )
+
+    # Local filesystem tools. Access is limited to explicitly approved roots.
+    TOOL_FILESYSTEM_ENABLED: bool = (
+        os.getenv("TOOL_FILESYSTEM_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_WORKSPACE_ROOTS: str = os.getenv(
+        "TOOL_WORKSPACE_ROOTS",
+        ""
+    ).strip()
+
+    TOOL_FILE_MAX_READ_BYTES: int = int(
+        os.getenv("TOOL_FILE_MAX_READ_BYTES", "200000")
+    )
+
+    TOOL_FILE_MAX_WRITE_BYTES: int = int(
+        os.getenv("TOOL_FILE_MAX_WRITE_BYTES", "100000")
+    )
+
+    TOOL_FILE_MAX_LIST_ENTRIES: int = int(
+        os.getenv("TOOL_FILE_MAX_LIST_ENTRIES", "500")
+    )
+
+    TOOL_FILE_MAX_SEARCH_RESULTS: int = int(
+        os.getenv("TOOL_FILE_MAX_SEARCH_RESULTS", "100")
+    )
+
+    # Allowlisted HTTP integration framework. Arbitrary LLM-generated URLs are
+    # never accepted, and redirects are not followed.
+    TOOL_HTTP_ENABLED: bool = (
+        os.getenv("TOOL_HTTP_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_HTTP_ALLOWED_HOSTS: str = os.getenv(
+        "TOOL_HTTP_ALLOWED_HOSTS",
+        ""
+    ).strip()
+
+    TOOL_HTTP_ALLOW_HTTP: bool = (
+        os.getenv("TOOL_HTTP_ALLOW_HTTP", "false").lower() == "true"
+    )
+
+    TOOL_HTTP_TIMEOUT_SECONDS: int = int(
+        os.getenv("TOOL_HTTP_TIMEOUT_SECONDS", "10")
+    )
+
+    TOOL_HTTP_MAX_RESPONSE_BYTES: int = int(
+        os.getenv("TOOL_HTTP_MAX_RESPONSE_BYTES", "200000")
+    )
+
+    # JSON object mapping host names to server-side header objects. The values
+    # are never returned to the LLM or included in execution history.
+    TOOL_HTTP_CREDENTIALS: str = os.getenv(
+        "TOOL_HTTP_CREDENTIALS",
+        ""
+    ).strip()
+
+    # Python execution is disabled and is not a hardened sandbox on Windows.
+    # Enabling it requires both flags below and is documented as unsafe.
+    PYTHON_EXECUTION_ENABLED: bool = (
+        os.getenv("PYTHON_EXECUTION_ENABLED", "false").lower() == "true"
+    )
+
+    PYTHON_EXECUTION_ALLOW_UNSAFE: bool = (
+        os.getenv(
+            "PYTHON_EXECUTION_ALLOW_UNSAFE",
+            "false",
+        ).lower() == "true"
+    )
+
+    PYTHON_EXECUTION_TIMEOUT_SECONDS: int = int(
+        os.getenv("PYTHON_EXECUTION_TIMEOUT_SECONDS", "5")
+    )
+
+    PYTHON_EXECUTION_MAX_CODE_BYTES: int = int(
+        os.getenv("PYTHON_EXECUTION_MAX_CODE_BYTES", "20000")
+    )
+
+    PYTHON_EXECUTION_MAX_OUTPUT_BYTES: int = int(
+        os.getenv("PYTHON_EXECUTION_MAX_OUTPUT_BYTES", "20000")
+    )
+
+    @property
+    def tool_workspace_roots(self) -> list[str]:
+        return [
+            root.strip()
+            for root in self.TOOL_WORKSPACE_ROOTS.split(",")
+            if root.strip()
+        ]
+
+    @property
+    def tool_http_allowed_hosts(self) -> set[str]:
+        return {
+            host.strip().lower().rstrip(".")
+            for host in self.TOOL_HTTP_ALLOWED_HOSTS.split(",")
+            if host.strip()
+        }
+
+    @property
+    def tool_http_credentials(self) -> dict[str, dict[str, str]]:
+        """Parse per-host server-side headers without ever logging them."""
+
+        if not self.TOOL_HTTP_CREDENTIALS:
+            return {}
+
+        import json
+
+        try:
+            parsed = json.loads(self.TOOL_HTTP_CREDENTIALS)
+
+        except (TypeError, ValueError):
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        result: dict[str, dict[str, str]] = {}
+
+        for host, headers in parsed.items():
+            if not isinstance(host, str) or not isinstance(headers, dict):
+                continue
+
+            cleaned = {
+                str(key): str(value)
+                for key, value in headers.items()
+                if str(key).lower() not in {"host", "content-length"}
+            }
+
+            if cleaned:
+                result[host.strip().lower().rstrip(".")] = cleaned
+
+        return result
 
     @property
     def ai_cache_allowed_complexities(self) -> set[str]:

@@ -7,6 +7,11 @@ survives deletion of the originating task or reminder. The foreign keys use
 A notification is considered delivered for the in-app channel when its row is
 successfully committed. The delivery status and retry fields leave room for
 future channels without changing the stored shape.
+
+Snoozing re-arms the associated reminder instead of creating a second
+notification. The notification row records the last snooze instant, the next
+scheduled delivery instant, and a cumulative counter for audit and limit
+enforcement. On re-delivery the same row becomes unread again.
 """
 
 from __future__ import annotations
@@ -140,6 +145,25 @@ class Notification(Base):
         nullable=True,
     )
 
+    # Snooze audit metadata. Snoozing never creates a second notification: the
+    # associated reminder is re-armed and this row is reused for re-delivery.
+    snoozed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    snoozed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    snooze_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
     dedupe_key: Mapped[str] = mapped_column(
         String(200),
         nullable=False,
@@ -184,6 +208,10 @@ class Notification(Base):
         CheckConstraint(
             "attempt_count >= 0",
             name="ck_notifications_attempt_count_non_negative",
+        ),
+        CheckConstraint(
+            "snooze_count >= 0",
+            name="ck_notifications_snooze_count_non_negative",
         ),
         UniqueConstraint(
             "user_id",

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_current_user_id, require_csrf
 from app.database.connection import get_db
 from app.exceptions.notification_exceptions import (
+    NotificationConflictError,
     NotificationNotFoundError,
     NotificationValidationError,
 )
@@ -23,6 +24,7 @@ from app.schemas.notification import (
     NotificationPreferenceUpdate,
     NotificationReadAllResponse,
     NotificationResponse,
+    NotificationSnoozeRequest,
 )
 from app.services.notification_preference_service import (
     notification_preference_service,
@@ -51,6 +53,15 @@ def _validation_error(error: Exception) -> HTTPException:
 
     return HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
+        detail=str(error),
+    )
+
+
+def _conflict(error: Exception) -> HTTPException:
+    logger.warning("Notification conflict: %s", error)
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
         detail=str(error),
     )
 
@@ -261,6 +272,44 @@ async def get_notification(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to retrieve notification.",
+        ) from error
+
+
+@router.post(
+    "/api/notifications/{notification_id}/snooze",
+    response_model=NotificationResponse,
+)
+async def snooze_notification(
+    notification_id: int,
+    payload: NotificationSnoozeRequest,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Snooze one owned notification by re-arming its reminder."""
+
+    try:
+        return await notification_service.snooze_notification(
+            session=session,
+            user_id=user_id,
+            notification_id=notification_id,
+            duration_minutes=payload.duration_minutes,
+            snooze_until=payload.snooze_until,
+        )
+
+    except NotificationNotFoundError as error:
+        raise _not_found() from error
+
+    except NotificationValidationError as error:
+        raise _validation_error(error) from error
+
+    except NotificationConflictError as error:
+        raise _conflict(error) from error
+
+    except Exception as error:
+        logger.exception("Unexpected error while snoozing a notification.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to snooze notification.",
         ) from error
 
 

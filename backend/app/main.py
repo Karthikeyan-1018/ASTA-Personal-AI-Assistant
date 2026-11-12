@@ -20,6 +20,7 @@ from app.api.recurrences import router as recurrences_router
 from app.api.reminders import router as reminders_router
 from app.api.task_actions import router as task_actions_router
 from app.api.tasks import router as tasks_router
+from app.api.tools import router as tools_router
 from app.core.config import settings
 from app.scheduler.runner import BackgroundScheduler
 
@@ -115,6 +116,7 @@ app.include_router(notifications_router)
 app.include_router(recurrences_router)
 
 app.include_router(task_actions_router)
+app.include_router(tools_router)
 
 
 @app.get("/")

@@ -2,8 +2,9 @@
 
 Phase 10 adds task-scoped reminder persistence and CRUD (10A), a database-backed
 scheduler (10B), in-app notifications (10C), recurring tasks (10D), reliability
-and recovery (10E), notification preferences with quiet hours (10F), and
-end-to-end regression coverage (10G).
+and recovery (10E), notification preferences with quiet hours (10F), end-to-end
+regression coverage (10G), and notification snoozing plus reminder rescheduling
+(10H).
 
 A reminder always belongs to exactly one existing task and one owner. Creating,
 rescheduling, cancelling, and deleting reminders are owner-scoped and reuse the
@@ -29,13 +30,17 @@ email, SMS, and push channels are out of scope.
 - Recursive generation is finite and duplicate-safe. Deactivating a rule never
   deletes generated tasks.
 - Quiet hours defer reminders; they never silently discard them.
+- Snoozing is not a read-status change. It re-arms the reminder that produced the
+  notification and reuses the same notification row on re-delivery.
+- Rescheduling updates a pending reminder in place; it never creates a second
+  notification or bypasses the lifecycle rules.
 - No task description, conversation text, memory, credential, or provider
   payload is copied into reminder, notification, or recurrence rows.
 
 ## Database architecture
 
-Phase 10 uses additive tables only. No existing table, column, index, or row is
-altered or backfilled.
+Phase 10 uses additive tables and additive columns only. No existing column,
+index, or row is altered or backfilled.
 
 | Table | Purpose |
 | --- | --- |
@@ -85,6 +90,9 @@ Constraints and indexes:
 | `task_title` | varchar(255) | Task-title snapshot at delivery time |
 | `reminder_at` | timestamptz | Snapshot of the reminder instant |
 | `is_read` / `read_at` | boolean / timestamptz | Owner read state |
+| `snoozed_at` | timestamptz, nullable | When the owner last snoozed this notification |
+| `snoozed_until` | timestamptz, nullable | Pending re-delivery instant; cleared on re-delivery |
+| `snooze_count` | integer | Cumulative snoozes for limit enforcement and audit |
 | `dedupe_key` | varchar(200) | `reminder:{reminder_id}` |
 | `attempt_count`, `next_attempt_at`, `last_error` | | Delivery metadata |
 | `delivered_at` | timestamptz | Set when the row is committed |
@@ -93,6 +101,7 @@ Constraints and indexes:
 Constraints and indexes:
 
 - `attempt_count >= 0`.
+- `snooze_count >= 0`.
 - Unique `(user_id, dedupe_key)` makes retries idempotent.
 - Indexes for owner history, unread history, delivery recovery, and retention.
 
@@ -255,6 +264,20 @@ create a second notification. If the reminder handler raises after the
 notification flush but before commit, the worker rolls back both the
 notification and the reminder lifecycle change.
 
+### Snooze re-delivery
+
+Snoozing does not deliver immediately and does not create a second
+notification. It re-arms the existing reminder with a new `remind_at` and dedupe
+key. The scheduler claims it at the new instant exactly like any other pending
+reminder. When delivery runs, the existing notification row is found by
+`reminder:{reminder_id}` and reused: `is_read` returns to `false`, `read_at` and
+`snoozed_until` clear, `reminder_at` and `delivered_at` update, and the original
+`snoozed_at` and `snooze_count` audit values are preserved.
+
+A snoozed reminder is still subject to the normal claim lease, retry, stale-claim
+recovery, task-status checks, and quiet-hour deferral. If the process restarts
+during the snooze, the pending reminder row is the only state needed to resume.
+
 ### Marker recovery and retention
 
 At startup and on each scheduler cycle, notifications left in `pending` or
@@ -284,6 +307,7 @@ resources both return `404`.
 | `GET` | `/api/notifications/unread` | List unread notifications |
 | `GET` | `/api/notifications/{id}` | Retrieve one notification |
 | `PATCH` | `/api/notifications/{id}/read` | Mark one notification read (idempotent) |
+| `POST` | `/api/notifications/{id}/snooze` | Snooze a delivered notification |
 | `POST` | `/api/notifications/read-all` | Mark every unread notification read |
 | `DELETE` | `/api/notifications/{id}` | Delete one notification |
 | `GET` | `/api/notifications/preferences` | Read effective preferences |
@@ -332,6 +356,103 @@ Rules:
   failure.
 - If preferences are missing or invalid, delivery falls back to the deployment
   defaults configured by `NOTIFICATION_QUIET_HOURS_DEFAULT_*`.
+
+## Snoozing and rescheduling
+
+Snoozing and rescheduling are related but distinct. Snoozing starts from a
+delivered notification and re-arms the reminder behind it. Rescheduling changes
+the time of a reminder that has not yet been delivered. Neither operation
+creates a duplicate notification.
+
+### Notification lifecycle
+
+| State | Meaning |
+| --- | --- |
+| delivered, unread | Visible to the owner |
+| delivered, read | Seen but still available in history |
+| snoozed | Read, with `snoozed_until` set and the reminder re-armed |
+| re-delivered | Same row, unread again, `snoozed_until` cleared |
+| dismissed | Notification row deleted; a pending snooze is cancelled |
+
+Only delivered notifications can be snoozed. Pending, failed, cancelled, or
+deleted notifications return `404` when they no longer exist and `409` when the
+current state does not allow snoozing. A notification whose task or reminder was
+deleted is rejected with `409`; its history remains readable.
+
+### Snooze API
+
+```http
+POST /api/notifications/42/snooze
+Content-Type: application/json
+
+{"duration_minutes": 30}
+```
+
+```http
+POST /api/notifications/42/snooze
+Content-Type: application/json
+
+{"snooze_until": "2026-11-12T09:00:00+05:30"}
+```
+
+Exactly one of `duration_minutes` and `snooze_until` is required.
+
+- `duration_minutes` accepts any value from 1 to
+  `NOTIFICATION_MAX_SNOOZE_MINUTES`. Common presets are `10`, `30`, `60`, and
+  `1440` (until the same wall-clock time tomorrow).
+- `snooze_until` must include a timezone offset. It is normalised to UTC before
+  storage. Naive instants are rejected by schema validation.
+- Instants in the past are rejected with `400`.
+- A custom instant beyond `NOTIFICATION_MAX_SNOOZE_MINUTES` is rejected.
+- Repeated snoozing is allowed until `NOTIFICATION_SNOOZE_MAX_COUNT` is reached.
+  A value of `0` or less means unlimited. The counter is per notification.
+- Snoozing is rejected while the reminder is `processing`, or when the task is
+  deleted, completed, or cancelled.
+- Snoozing is rejected when in-app notifications are disabled, because delivery
+  would otherwise be silently suppressed.
+- If the requested instant falls inside quiet hours, the stored schedule moves
+  to the end of the quiet window. This matches normal delivery deferral.
+
+The response is the updated notification with `is_read=true`, `snoozed_at`,
+`snoozed_until`, `snooze_count`, and `reminder_at` set to the effective
+schedule.
+
+### Dismissal
+
+`DELETE /api/notifications/{id}` deletes the notification and returns `204`.
+Deleting a notification that is waiting for snooze re-delivery also cancels the
+re-armed reminder, so a dismissed notification cannot reappear. Snoozing a
+deleted notification returns `404`.
+
+### Reschedule API
+
+```http
+PATCH /api/reminders/7
+Content-Type: application/json
+
+{"remind_at": "2026-11-12T09:30:00+05:30"}
+```
+
+The existing endpoint accepts either `remind_at` or `offset_minutes`, exactly as
+when creating a reminder. Rescheduling:
+
+- requires a `pending` reminder; delivered, processing, cancelled, suppressed,
+  and failed reminders return `409`;
+- requires an open task and the same owner;
+- rejects past instants;
+- recalculates `dedupe_key` from the task id and new UTC epoch second;
+- rejects another reminder for the same task at the same instant with `409`;
+- resets `attempt_count`, `next_attempt_at`, `claim_token`,
+  `processing_started_at`, `last_error`, and `delivered_at` without creating a
+  notification.
+
+On PostgreSQL, both snoozing and reminder mutations lock the notification and
+reminder rows with `SELECT ... FOR UPDATE`. The scheduler claims with
+`FOR UPDATE SKIP LOCKED`. If a worker claims first, the mutation waits and then
+sees `processing` and returns `409`; if the mutation commits first, the worker
+picks up the new schedule. The unique `(user_id, dedupe_key)` constraint is the
+final guard against concurrent duplicate schedules, and a failed snooze rolls
+back all notification metadata.
 
 ## Recurring tasks
 
@@ -518,6 +639,8 @@ REMINDER_SCHEDULER_SHUTDOWN_TIMEOUT_SECONDS=10
 
 NOTIFICATION_RETENTION_DAYS=365
 NOTIFICATION_MAX_ATTEMPTS=5
+NOTIFICATION_SNOOZE_MAX_COUNT=10
+NOTIFICATION_MAX_SNOOZE_MINUTES=525600
 NOTIFICATION_QUIET_HOURS_DEFAULT_ENABLED=false
 NOTIFICATION_QUIET_HOURS_DEFAULT_START=22:00
 NOTIFICATION_QUIET_HOURS_DEFAULT_END=07:00
@@ -544,6 +667,10 @@ Notes:
   pending/failed in-app rows.
 - `NOTIFICATION_RETENTION_DAYS=0` disables purging rather than falling back to
   the default.
+- `NOTIFICATION_SNOOZE_MAX_COUNT` limits repeated snoozing per notification.
+  `0` or less means unlimited.
+- `NOTIFICATION_MAX_SNOOZE_MINUTES` bounds a single duration or custom instant.
+  The default `525600` is 365 days.
 - `RECURRENCE_GENERATION_INTERVAL_SECONDS` controls how soon an active rule is
   eligible for another generation run after a successful pass.
 - `RECURRENCE_GENERATION_ENABLED=false` leaves recurrence rows untouched while
@@ -563,13 +690,14 @@ Phase 10 migrations are additive and chain onto the existing head:
 | `a2b3c4d5e6f7` | Add in-app notifications (10C) |
 | `b3c4d5e6f7a8` | Add notification preferences and quiet hours (10F) |
 | `c4d5e6f7a8b9` | Add recurrence rules and occurrence links (10D) |
+| `d5e6f7a8b9c0` | Add notification snooze audit fields (10H) |
 
 ```powershell
 cd backend
 ..\venv\Scripts\python.exe -m alembic upgrade head
 ```
 
-Current head: `c4d5e6f7a8b9`.
+Current head: `d5e6f7a8b9c0`.
 
 ## Tests
 
@@ -583,6 +711,15 @@ cd backend
 ..\venv\Scripts\python.exe -m unittest tests.test_phase10_reliability -v
 ..\venv\Scripts\python.exe -m unittest tests.test_phase10_preferences -v
 ..\venv\Scripts\python.exe -m unittest tests.test_phase10_integration -v
+..\venv\Scripts\python.exe -m unittest tests.test_phase10_snooze_reschedule -v
+```
+
+Real PostgreSQL locking and concurrency checks are opt-in and create only
+temporary rows:
+
+```powershell
+$env:ASTA_PHASE10_POSTGRES_TESTS="1"
+..\venv\Scripts\python.exe -m unittest tests.test_phase10_snooze_postgres -v
 ```
 
 The suites cover deadline-relative and absolute creation, date-only anchoring,
@@ -590,7 +727,10 @@ UTC normalisation, duplicate prevention, ownership isolation, atomic claims,
 restart and stale-lease recovery, bounded retries, partial-delivery rollback,
 notification read state, history retention after task deletion, recurrence
 cadences and finite generation, quiet-hour windows across midnight and daylight
-saving, suppression, and end-to-end reminder/recurrence flows.
+saving, suppression, snooze presets and custom instants, snooze limits and
+repetition, dismissed and deleted-task behaviour, quiet-hour-adjusted snoozes,
+restart recovery of snoozed reminders, reschedule lifecycle and duplicate rules,
+row-lock waiting, and concurrent dedupe enforcement.
 
 Full regression:
 
@@ -606,8 +746,9 @@ cd backend
 - The scheduler is an in-process loop. Running multiple API processes can
   execute multiple loops safely because claims are database-backed, but there is
   no separate worker deployment mode or external queue.
-- Snoozing, reminder fan-out, and per-task notification routing are not
-  implemented.
+- Snooze presets are client-supplied durations or custom instants. ASTA does not
+  yet provide notification action buttons, reminder fan-out, or per-task
+  notification routing.
 - Natural-language reminder scheduling is deferred. Existing “remind me to…”
   handling remains task creation through the task-intent engine.
 - Monthly recurrence does not clamp to the last day of shorter months; months

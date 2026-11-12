@@ -153,6 +153,12 @@ def _dedupe_key(task_id: int, remind_at: datetime) -> str:
     )
 
 
+def _supports_for_update(session: AsyncSession) -> bool:
+    bind = session.get_bind()
+
+    return getattr(getattr(bind, "dialect", None), "name", "") == "postgresql"
+
+
 def _normalise_status(value: Any) -> ReminderStatus:
     if isinstance(value, ReminderStatus):
         return value
@@ -284,6 +290,34 @@ class ReminderService:
 
         return reminder
 
+    async def _get_reminder_for_update(
+        self,
+        session: AsyncSession,
+        user_id: int,
+        reminder_id: int,
+    ) -> TaskReminder:
+        """Return an owned reminder while locking it on PostgreSQL.
+
+        Mutations use this variant so a concurrent scheduler claim and a
+        reschedule or cancellation cannot interleave. SQLite serialises writers
+        and is supported for tests.
+        """
+
+        stmt = select(TaskReminder).where(
+            TaskReminder.id == reminder_id,
+            TaskReminder.user_id == user_id,
+        )
+
+        if _supports_for_update(session):
+            stmt = stmt.with_for_update()
+
+        reminder = (await session.execute(stmt)).scalar_one_or_none()
+
+        if reminder is None:
+            raise ReminderNotFoundError("Reminder not found.")
+
+        return reminder
+
     async def list_for_task(
         self,
         session: AsyncSession,
@@ -376,7 +410,7 @@ class ReminderService:
     ) -> TaskReminder:
         """Reschedule a pending reminder using a new offset or instant."""
 
-        reminder = await self.get_reminder(
+        reminder = await self._get_reminder_for_update(
             session=session,
             user_id=user_id,
             reminder_id=reminder_id,
@@ -424,6 +458,8 @@ class ReminderService:
         reminder.dedupe_key = dedupe_key
         reminder.attempt_count = 0
         reminder.next_attempt_at = None
+        reminder.claim_token = None
+        reminder.processing_started_at = None
         reminder.last_error = None
         reminder.delivered_at = None
 
@@ -456,7 +492,7 @@ class ReminderService:
     ) -> TaskReminder:
         """Cancel a pending reminder. Cancelling twice is idempotent."""
 
-        reminder = await self.get_reminder(
+        reminder = await self._get_reminder_for_update(
             session=session,
             user_id=user_id,
             reminder_id=reminder_id,

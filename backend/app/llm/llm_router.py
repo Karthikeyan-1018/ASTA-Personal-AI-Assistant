@@ -111,6 +111,40 @@ def _success_result(
     }
 
 
+def _success_tool_result(
+    *,
+    decision,
+    provider_name: str,
+    model: str | None,
+    turn,
+    fallback_used: bool,
+    started: float,
+    prompt: str,
+    request_type: str | None,
+) -> dict:
+    return {
+        "provider": provider_name,
+        "model": model,
+        "response": turn.content,
+        "tool_calls": list(turn.tool_calls),
+        "tool_call_schemas": turn.tool_call_schemas,
+        "routing_policy": decision.policy,
+        "complexity": decision.complexity,
+        "provider_order": list(decision.provider_order),
+        "fallback_used": fallback_used,
+        "duration_ms": round(
+            max(0.0, (time.perf_counter() - started) * 1000.0),
+            2,
+        ),
+        "usage": turn.usage or _usage_metadata(
+            _provider(provider_name),
+            prompt,
+            turn.content,
+        ),
+        "request_type": request_type,
+    }
+
+
 class LLMRouter:
 
     async def check_providers(self) -> dict:
@@ -311,6 +345,162 @@ class LLMRouter:
 
                 logger.exception(
                     "Unexpected %s failure.",
+                    provider_name.capitalize(),
+                )
+
+            if is_last:
+                break
+
+        if attempted_provider:
+            raise LLMUnavailableError(
+                "Both Groq and Ollama providers failed to generate a response."
+            )
+
+        raise LLMUnavailableError(
+            "Both Groq and Ollama providers are unavailable."
+        )
+
+
+    async def generate_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        private: bool = False,
+        complexity=None,
+        policy: str | None = None,
+        request_type: str | None = "chat",
+    ) -> dict:
+        """Run one provider turn that may request tool calls.
+
+        The private path is Ollama-only and never consults Groq. The returned
+        mapping carries normalized ``tool_calls`` objects that only the
+        backend executor may act on.
+        """
+
+        started = time.perf_counter()
+
+        decision = select_route(
+            private=private,
+            complexity=complexity,
+            policy=policy,
+        )
+
+        prompt = "\n".join(
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") in {"system", "user"}
+        )
+
+        if private:
+
+            if not await ollama_provider.health_check():
+
+                raise LLMUnavailableError(
+                    "Local AI provider is unavailable. "
+                    "Private request was not sent to the cloud."
+                )
+
+            try:
+                ollama_provider.last_usage = None
+                turn = await ollama_provider.generate_with_tools(
+                    messages,
+                    tools=[],
+                    model=decision.primary_model,
+                )
+
+            except LLMTimeoutError:
+                raise
+
+            except Exception as error:
+                logger.error(
+                    "Ollama failed during a private tool-calling turn.",
+                    exc_info=True,
+                )
+                raise LLMUnavailableError(
+                    "Local AI provider failed. "
+                    "Private request was not sent to the cloud."
+                ) from error
+
+            if _is_blank_answer(turn.content) and not turn.tool_calls:
+                raise LLMUnavailableError(
+                    "Local AI provider returned an empty response. "
+                    "Private request was not sent to the cloud."
+                )
+
+            return _success_tool_result(
+                decision=decision,
+                provider_name="ollama",
+                model=decision.primary_model,
+                turn=turn,
+                fallback_used=False,
+                started=started,
+                prompt=prompt,
+                request_type=request_type,
+            )
+
+        attempted_provider = False
+
+        for index, provider_name in enumerate(decision.provider_order):
+
+            provider = _provider(provider_name)
+            is_last = index == len(decision.provider_order) - 1
+            fallback_used = provider_name == decision.fallback
+            model = decision.model_for(provider_name)
+
+            if not await provider.health_check():
+
+                logger.warning(
+                    "%s provider is unavailable.",
+                    provider_name.capitalize(),
+                )
+
+                continue
+
+            attempted_provider = True
+
+            try:
+                provider.last_usage = None
+
+                turn = await provider.generate_with_tools(
+                    messages,
+                    tools=tools,
+                    model=model,
+                )
+
+                if turn.tool_calls or not _is_blank_answer(turn.content):
+                    return _success_tool_result(
+                        decision=decision,
+                        provider_name=provider_name,
+                        model=model,
+                        turn=turn,
+                        fallback_used=fallback_used,
+                        started=started,
+                        prompt=prompt,
+                        request_type=request_type,
+                    )
+
+                logger.warning(
+                    "%s returned an empty response.",
+                    provider_name.capitalize(),
+                )
+
+            except LLMTimeoutError:
+                logger.warning(
+                    "%s timed out during tool calling.",
+                    provider_name.capitalize(),
+                    exc_info=True,
+                )
+
+            except LLMProviderError:
+                logger.warning(
+                    "%s provider failed during tool calling.",
+                    provider_name.capitalize(),
+                    exc_info=True,
+                )
+
+            except Exception:
+                logger.exception(
+                    "Unexpected %s failure during tool calling.",
                     provider_name.capitalize(),
                 )
 

@@ -35,9 +35,62 @@ class NotificationResponse(BaseModel):
     reminder_at: datetime | None
     is_read: bool
     read_at: datetime | None
+    snoozed_at: datetime | None
+    snoozed_until: datetime | None
+    snooze_count: int
     delivered_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class NotificationSnoozeRequest(BaseModel):
+    """Snooze a delivered notification by duration or absolute instant.
+
+    Exactly one of ``duration_minutes`` and ``snooze_until`` must be supplied.
+    Common durations are 10, 30, and 60 minutes, and 1440 minutes for "until
+    tomorrow". ``snooze_until`` must include a timezone offset and is normalised
+    to UTC by the service.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    duration_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=525600,
+    )
+
+    snooze_until: datetime | None = None
+
+    @field_validator("snooze_until")
+    @classmethod
+    def validate_snooze_until(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "snooze_until must include a timezone offset."
+            )
+
+        return value
+
+    @model_validator(mode="after")
+    def validate_one_source(self):
+        has_duration = self.duration_minutes is not None
+        has_instant = self.snooze_until is not None
+
+        if has_duration and has_instant:
+            raise ValueError(
+                "Provide either duration_minutes or snooze_until, not both."
+            )
+
+        if not has_duration and not has_instant:
+            raise ValueError(
+                "Provide duration_minutes or snooze_until."
+            )
+
+        return self
 
 
 class NotificationReadAllResponse(BaseModel):

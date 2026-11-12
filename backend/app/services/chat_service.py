@@ -22,6 +22,7 @@ from app.services.conversation_service import (
     derive_title,
 )
 from app.services.response_cache_service import response_cache_service
+from app.services.tool_orchestrator import tool_orchestrator
 from app.services.usage_tracking_service import usage_tracking_service
 from app.task_intent.chat_handler import task_intent_chat_handler
 
@@ -168,6 +169,12 @@ class ChatService:
         """
 
         if private or not settings.AI_CACHE_ENABLED:
+            return False
+
+        # Tool-enabled chat is never served from the cache and its responses
+        # are never stored. Tool results depend on live state and cannot be
+        # invalidated safely with the current cache design.
+        if settings.TOOL_CALLING_ENABLED:
             return False
 
         if not classification.cache_eligible:
@@ -407,12 +414,33 @@ class ChatService:
         started = time.perf_counter()
 
         try:
-            result = await llm_router.generate_response(
-                prompt=contextual_prompt,
-                private=private,
-                complexity=classification.complexity,
-                request_type="chat",
-            )
+            tool_result = None
+
+            if (
+                settings.TOOL_CALLING_ENABLED
+                and not private
+                and user_id is not None
+                and session is not None
+                and conversation is not None
+            ):
+                tool_result = await tool_orchestrator.run(
+                    session=session,
+                    user_id=user_id,
+                    conversation_id=conversation.id,
+                    private=False,
+                    prompt=contextual_prompt,
+                    complexity=classification.complexity,
+                )
+
+            if tool_result is None:
+                result = await llm_router.generate_response(
+                    prompt=contextual_prompt,
+                    private=private,
+                    complexity=classification.complexity,
+                    request_type="chat",
+                )
+            else:
+                result = tool_result
 
         except Exception as error:
             await usage_tracking_service.record(
@@ -462,7 +490,11 @@ class ChatService:
             result = dict(result)
             result["conversation_id"] = conversation.id
 
-        if cache_eligible and result.get("response"):
+        if (
+            cache_eligible
+            and not result.get("tool_calling")
+            and result.get("response")
+        ):
             await response_cache_service.store(
                 session=session,
                 user_id=user_id,
