@@ -39,3 +39,17 @@ Do not start all five components immediately.
    
    Strengthen local inference and failure recovery.
 My strongest recommendation: Prioritize Phase 11, the Function Calling and Tool Engine, after Phase 10. It is the foundation that will allow ASTA to interact with your operating system, search the web, work with files and automate tasks safely. Without this execution layer, adding more AI models alone will not make ASTA a capable personal agent.
+
+
+
+Here is the order I recommend following with OpenCode.
+Phase	Name	Priority
+11H	End-to-end Tool Integration	Critical
+11I	History and Reliability	Critical
+12	Local OS Automation	High
+13	Streaming and Async	High
+14	Desktop Interface	High
+15	Voice Assistant	High
+16	External Application Integrations	High
+17	Browser Automation	High
+18	Autonomous AI Agent	Final stage

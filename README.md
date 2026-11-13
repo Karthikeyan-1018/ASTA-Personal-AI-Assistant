@@ -28,6 +28,13 @@ long-term memory.
 - Natural-language task management with confirmation-gated mutations.
 - Central tool registry with validated metadata, input/output schemas, duplicate prevention, discovery, and enabled/disabled views (Phase 11A).
 - Provider-specific LLM function calling for Groq and Ollama, with normalized tool-call parsing, safe malformed-response handling, and text-only fallback (Phase 11B).
+- Central tool execution engine with trusted-context checks, argument validation, permission and confirmation enforcement, timeouts, result bounds, credential redaction, and metadata-only execution history (Phase 11C).
+- Hardened tool permissions and confirmations with category, enablement, and private-mode policy; owner-, conversation-, and argument-bound single-use approvals; expiry, replay, duplicate, and tamper handling; and post-approval revalidation and reauthorization (Phase 11D).
+- Configurable web search through a self-hosted SearXNG instance or the managed Tavily API, returning normalized, size-bounded, untrusted result metadata through the central tool executor (Phase 11E).
+- Root-confined filesystem tools for directory listing, name search, bounded UTF-8 reads, metadata, confirmed file creation, and confirmed atomic updates, with symlink/junction, sensitive-file, binary-format, and Windows path protections (Phase 11F).
+- Resource-limited Python execution inside a real Windows AppContainer and Job Object boundary, with a disposable workspace, a scrubbed environment, blocked subprocesses, denied network access, bounded output, and confirmed, disabled-by-default tool integration (Phase 11G).
+- End-to-end tool calling in the real chat pipeline, with bounded multi-round execution, owner- and argument-bound confirmation approvals, metadata-only transcript persistence, safe provider-failure recovery, and unchanged text-only behaviour when disabled (Phase 11H).
+- Tool execution history and reliability with a validated lifecycle, start/completion timestamps, retry and truncation metadata, owner-scoped status/summary APIs, opt-in bounded retries for idempotent read-only tools, idempotency-key duplicate prevention, restart recovery, and structured logs/metrics (Phase 11I).
 - Timezone-aware deadline views (overdue, today, tomorrow, upcoming).
 - Unified context assembly from preferences, memories, tasks, deadlines, and bounded history.
 - Per-user ownership checks on every conversation, message, preference, task, usage, and AI cache query.
@@ -270,6 +277,320 @@ See [docs/tool_calling.md](docs/tool_calling.md) for provider formats, parsing
 rules, message translation, router behavior, limits, and the Phase 11C
 boundary.
 
+## Tool execution
+
+Phase 11C adds the single execution path for every tool call. The executor takes
+a normalized tool name and argument mapping plus a backend-created
+`ToolContext`, then:
+
+1. rejects a missing or malformed trusted context, so there is no anonymous
+   owner fallback;
+2. resolves the tool through the registry and returns structured `not_found` or
+   `configuration` errors;
+3. applies enablement, privacy, sensitive-tool, and confirmation policy before
+   argument details are disclosed;
+4. checks argument size and validates the payload against the tool's Pydantic
+   model without echoing submitted values;
+5. creates a pending confirmation or claims an existing one, revalidates the
+   stored arguments, and rechecks policy;
+6. executes under a wall-clock timeout and distinguishes caller cancellation
+   from a tool that raises `CancelledError` itself;
+7. redacts credential-shaped result data and error messages, removes stack
+   traces from returned errors, and bounds the serialized result size;
+8. records metadata-only history and attaches or fails the confirmation as
+   best-effort bookkeeping.
+
+Every outcome is a normalized `ToolResult` with a stable status
+(`success`, `error`, `timeout`, `denied`, or `confirmation_required`) and a safe
+error category. One failing tool never crashes the assistant request. Owner
+identity and permissions are never accepted from provider output or request
+arguments.
+
+See [docs/tool_execution.md](docs/tool_execution.md) for the execution
+lifecycle, status and error mapping, security properties, REST endpoints,
+configuration, tests, known limitations, and Phase 11D hardening.
+
+## Tool permissions and confirmations
+
+Phase 11D centralizes authorization in `app/tools/permissions.py` and hardens
+the existing confirmation service. It does not add a parallel execution path.
+
+Authorization is decided from the trusted `ToolContext`, never from model output
+or request arguments. The policy evaluates, in order:
+
+1. tool enablement (`disabled` denial);
+2. private-mode restrictions;
+3. the sensitive-tool deployment policy;
+4. `requires_confirmation`, which now applies to every category, including
+   `read_only`.
+
+A tool that needs approval returns `confirmation_required` without executing.
+The pending confirmation is bound to the owner, the proposing conversation, the
+tool name, and the canonical argument digest. Approval is an atomic single-use
+claim, so replay, duplicate approval, a different owner, a different
+conversation, and modified arguments are all rejected. Rejection and expiry are
+terminal and clear the stored payload.
+
+After a claim, the executor revalidates the stored arguments and re-runs the
+permission policy before executing. An approval therefore cannot bypass
+validation or current authorization. A post-claim failure marks the
+confirmation failed, a successful run attaches the metadata-only history row,
+and the existing authentication, CSRF, and owner-scoping protections are
+unchanged.
+
+See
+[docs/tool_permissions_and_confirmations.md](docs/tool_permissions_and_confirmations.md)
+for the policy matrix, confirmation lifecycle and binding rules, executor
+integration, failure mapping, REST status codes, configuration, tests, and
+limitations.
+
+## Web search tool
+
+Phase 11E adds the built-in `web_search` read-only tool. It is disabled by
+default and is only offered to the model when `WEB_SEARCH_ENABLED=true`, the
+selected provider is configured, and the general tool-calling path is enabled.
+
+Two documented providers are supported:
+
+- **SearXNG** (`WEB_SEARCH_PROVIDER=searxng`, the default) is a self-hosted
+  metasearch instance whose administrator has enabled `format=json`. It needs
+  `WEB_SEARCH_BASE_URL` and **does not require an API key**. This is the
+  preferred option when search should stay on infrastructure you control.
+- **Tavily** (`WEB_SEARCH_PROVIDER=tavily`) is a managed search API reached at
+  `https://api.tavily.com/search`. It **requires** `WEB_SEARCH_API_KEY`, sent as
+  a server-side bearer credential.
+
+The tool validates a non-blank, control-character-free query of at most 500
+characters and `max_results` between 1 and 10. The configured
+`WEB_SEARCH_MAX_RESULTS` value further caps the effective count. It returns
+only normalized `title`, `url`, `snippet`, and `source` fields, always marked
+`untrusted`. Result URLs must be HTTP(S), contain no embedded credentials or
+unsafe characters, and the response body is read under a configured byte
+limit. Redirects are not followed, page content is never fetched, and provider
+error bodies, credentials, and search queries are never logged.
+
+Provider failures, timeouts, rate limits, invalid JSON, unexpected payload
+shapes, redirects, and oversized responses become safe structured tool errors.
+Web search is denied in private mode and, as a read-only tool, does not require
+confirmation; every call still goes through `ToolExecutor` and the central
+permission policy.
+
+```env
+# Web search (Phase 11E). Disabled by default.
+WEB_SEARCH_ENABLED=false
+WEB_SEARCH_PROVIDER=searxng
+WEB_SEARCH_BASE_URL=
+WEB_SEARCH_API_KEY=
+WEB_SEARCH_TIMEOUT_SECONDS=10
+WEB_SEARCH_MAX_RESULTS=5
+WEB_SEARCH_MAX_RESPONSE_BYTES=262144
+```
+
+See [docs/web_search.md](docs/web_search.md) for provider setup, the request
+and result contract, error mapping, security properties, tests, and
+limitations.
+
+## Filesystem tools
+
+Phase 11F adds six built-in filesystem tools. They are disabled by default and
+only operate inside explicitly configured workspace roots. The tools never
+delete files, mutate a directory tree recursively, execute a file, or run a
+shell command.
+
+| Tool | Category | Confirmation | Purpose |
+| --- | --- | --- | --- |
+| `fs_list` | read-only | no | List files, directories, and symlinks in one directory. |
+| `fs_search` | read-only | no | Find files by a name glob below one directory. |
+| `fs_read` | read-only | no | Read a bounded UTF-8 text file. |
+| `fs_metadata` | read-only | no | Return type, size, modified time, and suffix. |
+| `fs_create` | reversible | yes | Create a text file, optionally replacing an existing one. |
+| `fs_update` | reversible | yes | Replace the contents of an existing text file. |
+
+Every call goes through `ToolExecutor` and the central permission policy. The
+filesystem tools are denied in private mode. A relative path resolves against
+the first configured root; an absolute path is accepted only when it resolves
+inside one of the configured roots.
+
+Security is fail-closed:
+
+- paths are resolved (following symlinks and junctions) and must remain inside
+  an approved root; `..` traversal, absolute escapes, and link escapes are
+  rejected;
+- drive roots and Windows system directories cannot be configured as roots,
+  nor can a root contain or live inside one;
+- `.env` files, credentials, secrets, private keys, key stores, Terraform
+  state, sensitive directories such as `.ssh`/`.aws`/`.git`, and common
+  credential files are denied and omitted from listings and search;
+- Windows alternate data streams, reserved device names, trailing dots or
+  spaces, drive-relative paths, and rooted paths without a drive letter are
+  rejected;
+- reads are bounded, must decode as UTF-8, and reject NUL bytes, control-heavy
+  binary content, and known binary formats; writes are bounded and text-only;
+- creates and updates always require explicit confirmation bound to the exact
+  owner, conversation, tool, and arguments;
+- non-overwriting creates use exclusive creation, while updates and overwrites
+  write a same-directory temporary file and atomically replace the destination;
+  a failed write leaves the original unchanged;
+- read content is marked `untrusted` and is never written to execution history.
+
+```env
+# Filesystem tools (Phase 11F). Disabled by default.
+TOOL_FILESYSTEM_ENABLED=false
+# Comma-separated absolute directories that may be accessed.
+TOOL_WORKSPACE_ROOTS=
+TOOL_FILE_MAX_READ_BYTES=200000
+TOOL_FILE_MAX_WRITE_BYTES=100000
+TOOL_FILE_MAX_LIST_ENTRIES=500
+TOOL_FILE_MAX_SEARCH_RESULTS=100
+```
+
+See [docs/filesystem_tools.md](docs/filesystem_tools.md) for operation
+contracts, root rules, Windows handling, sensitive-file policy, atomic-write
+behavior, error mapping, tests, and limitations.
+
+## Python execution sandbox
+
+Phase 11G adds the `python_execute` sensitive tool. It remains disabled unless
+`PYTHON_SANDBOX_ENABLED=true`, `TOOL_ALLOW_SENSITIVE=true`, the Windows
+AppContainer runtime is available, and the owner approves a per-call
+confirmation. Private-mode requests are always denied.
+
+The tool is not an `exec()` wrapper and not a plain subprocess. Each call gets a
+fresh AppContainer profile with no capabilities and a Job Object:
+
+- the child token cannot read ASTA source, `.env` files, user documents, or any
+  path that was not explicitly granted; only the disposable workspace is
+  writable and only the interpreter installation is readable;
+- network access is blocked by the AppContainer token and cannot be enabled by
+  configuration; asking for it fails closed;
+- child process creation is blocked by the job's one-process limit;
+- memory and CPU quotas are enforced by the job, and the wall-clock timeout
+  terminates the whole job;
+- stdin, stdout, and stderr are the only inherited handles, and the environment
+  block contains no `PATH`, `USERPROFILE`, or ASTA variables;
+- combined output is bounded, overflow terminates the job, and the workspace,
+  profile, ACL grants, job, and handles are cleaned up in `finally` paths.
+
+An AST denylist rejects escape-oriented imports such as `ctypes`, `winreg`,
+`importlib`, `msvcrt`, and `multiprocessing`. It is defence in depth only; the
+AppContainer/Job Object boundary is the security control. Unsupported platforms
+and missing runtimes fail closed.
+
+```env
+# Python execution sandbox (Phase 11G). Disabled by default.
+PYTHON_SANDBOX_ENABLED=false
+PYTHON_SANDBOX_TIMEOUT_SECONDS=5
+PYTHON_SANDBOX_CPU_SECONDS=5
+PYTHON_SANDBOX_MEMORY_MB=256
+PYTHON_SANDBOX_MAX_SOURCE_BYTES=20000
+PYTHON_SANDBOX_MAX_OUTPUT_BYTES=20000
+PYTHON_SANDBOX_ALLOW_NETWORK=false
+PYTHON_SANDBOX_WORKSPACE_PARENT=
+```
+
+See [docs/python_execution_sandbox.md](docs/python_execution_sandbox.md) for
+the execution lifecycle, actual isolation boundary, limits, error handling,
+Windows requirements, test coverage, and residual risks.
+
+## Chat tool-calling integration
+
+Phase 11H connects the existing tool engine to `POST /api/chat/`. It adds no
+parallel orchestrator: `ToolOrchestrator` calls the same `ToolExecutor` and
+confirmation service used by the direct `/api/tools` routes. The path is opt-in
+through `TOOL_CALLING_ENABLED`; when it is disabled, chat and its public
+response shape are unchanged.
+
+A request can make several bounded provider turns. The model may return text,
+one call, or multiple calls. Every call is validated, authorized, executed, and
+redacted by the executor. Safe results are fed back as explicitly untrusted
+tool messages, and one final text-only turn is always allowed so the model
+cannot loop indefinitely. Round, per-turn, per-request, result-size, and
+result-context limits are enforced, and an identical call is rejected within
+the same request.
+
+If a tool requires confirmation, the request stops immediately and nothing is
+executed. The response returns a deterministic pending notice plus the
+confirmation id. The owner can then call:
+
+- `POST /api/chat/confirmations/{id}/approve`
+- `POST /api/chat/confirmations/{id}/reject`
+
+Approval executes the exact stored arguments, atomically claims the
+confirmation, and then asks the provider for a final text-only answer. The model
+cannot start another tool chain or approve its own action. Missing and
+cross-owner confirmations return `404`, resolved or tampered confirmations
+return `409`, and expired confirmations return `410`.
+
+Tool activity is persisted as ordered assistant-role transcript entries with
+`messages.message_metadata.kind` (`tool_call`, `tool_result`,
+`tool_confirmation_required`, `tool_rejected`). Only metadata is stored:
+argument values, tool output, file contents, and credentials are never written
+to the transcript, and transcript entries are excluded from future prompts.
+
+If a provider fails before any tool runs, the existing `503`/`504` contract is
+preserved. If a tool already ran and a later turn fails, a deterministic summary
+is returned so a retry cannot silently execute the action again. Streaming is
+not implemented.
+
+```env
+# Tool loop (Phase 11H)
+TOOL_MAX_ROUNDS=2
+TOOL_MAX_CALLS_PER_REQUEST=5
+TOOL_MAX_CALLS_PER_TURN=8
+TOOL_MAX_RESULT_CONTEXT_BYTES=50000
+TOOL_LOOP_PREVENTION_ENABLED=true
+```
+
+See [docs/tool_calling_api_integration.md](docs/tool_calling_api_integration.md)
+for the architecture, lifecycle, response schema, limits, provider behaviour,
+confirmation workflow, persistence, security properties, tests, and
+limitations.
+
+## Tool history and reliability
+
+Phase 11I extends the existing metadata-only history with a validated lifecycle
+(`pending`, `awaiting_confirmation`, `approved`, `running`, `succeeded`,
+`failed`, `rejected`, `expired`, `cancelled`, `timed_out`), start/completion
+timestamps, retry counts, truncation flags, and hashed idempotency keys. Legal
+transitions are enforced, illegal or duplicate terminal writes are ignored, and
+Phase 11D confirmation handling is unchanged.
+
+History is written in two phases. An in-flight row is created before any policy
+decision or side effect, then finalized with a terminal outcome. On startup,
+stale `pending`, `approved`, and `running` rows are marked `cancelled` with
+`InterruptedExecution`; `awaiting_confirmation` rows are left for the owner.
+History and metrics failures never change a tool result.
+
+Retries are opt-in and narrow: only read-only tools that declare
+`idempotent = True`, do not require confirmation, and fail with a transient
+timeout/provider error. Confirmation-bound and state-changing tools are never
+retried automatically. `POST /api/tools/execute` accepts an optional
+`Idempotency-Key` header; only its SHA-256 digest is stored. A repeated request
+returns metadata-only stored state with `idempotent_replay=true` and never the
+original payload.
+
+The owner-scoped endpoints `GET /api/tools/executions/{id}`, `/status`, and
+`/summary`, plus `GET /api/tools/metrics`, expose lifecycle, safe metadata, and
+process-local counters. Structured logs contain tool name, outcome, duration,
+retry count, confirmation state, and error code only — never arguments, output,
+files, prompts, or credentials.
+
+```env
+# Tool history and reliability (Phase 11I)
+TOOL_HISTORY_ENABLED=true
+TOOL_RETRY_ENABLED=false
+TOOL_MAX_RETRIES=1
+TOOL_RETRY_BACKOFF_MS=250
+TOOL_RECOVERY_ON_STARTUP=true
+TOOL_STALE_EXECUTION_SECONDS=300
+TOOL_EXECUTION_RETENTION_DAYS=90
+```
+
+See [docs/tool_history_and_reliability.md](docs/tool_history_and_reliability.md)
+for the state machine, schema and migration, endpoints, retry policy,
+idempotency semantics, restart recovery, observability, retention, security
+properties, tests, and limitations.
+
 ## Authentication and local-network access
 
 ASTA has one owner account. Passwords are hashed with Argon2id, and login issues
@@ -365,6 +686,17 @@ Windows Firewall rules, the future frontend contract, and security limitations.
 | `POST` | `/api/task-actions/{id}/reject` | Reject a pending action |
 | `GET` | `/api/ai/usage/summary` | Aggregated AI usage and performance for the owner |
 | `GET` | `/api/ai/usage/recent` | Recent metadata-only AI usage rows for the owner |
+| `GET` | `/api/tools/` | List registered tools, including disabled ones |
+| `POST` | `/api/tools/execute` | Execute a tool under full server-side policy |
+| `GET` | `/api/tools/executions` | List metadata-only tool execution history |
+| `GET` | `/api/tools/executions/stats` | Aggregate tool execution statistics |
+| `GET` | `/api/tools/executions/{id}` | Retrieve one owner-scoped execution record |
+| `GET` | `/api/tools/executions/{id}/status` | Read one execution's lifecycle and outcome |
+| `GET` | `/api/tools/executions/{id}/summary` | Read a compact, payload-free execution summary |
+| `GET` | `/api/tools/metrics` | Process-local aggregate tool metrics |
+| `GET` | `/api/tools/confirmations` | List pending tool confirmations |
+| `POST` | `/api/tools/confirmations/{id}/confirm` | Confirm and execute a pending tool call |
+| `POST` | `/api/tools/confirmations/{id}/reject` | Reject a pending tool call |
 
 All endpoints above except `POST /api/auth/login` and the one-time
 `POST /api/auth/setup` require a valid session. State-changing requests must
@@ -490,6 +822,61 @@ AI_MEMORY_KEYWORD_WEIGHT=0.3
 AI_MEMORY_CANDIDATE_LIMIT=20
 AI_MEMORY_MIN_HYBRID_SCORE=0.05
 
+# Tool engine (Phases 11A-11I)
+TOOL_CALLING_ENABLED=false
+TOOL_MAX_CALLS_PER_REQUEST=5
+TOOL_MAX_CALLS_PER_TURN=8
+TOOL_MAX_ROUNDS=2
+TOOL_MAX_RESULT_CONTEXT_BYTES=50000
+TOOL_LOOP_PREVENTION_ENABLED=true
+TOOL_EXECUTION_TIMEOUT_SECONDS=15
+TOOL_MAX_ARGUMENT_BYTES=16384
+TOOL_MAX_RESULT_BYTES=20000
+TOOL_CONFIRMATION_TTL_SECONDS=600
+TOOL_CONFIRMATION_MAX_PENDING=10
+TOOL_HISTORY_ENABLED=true
+TOOL_EXECUTION_RETENTION_DAYS=90
+TOOL_ALLOW_SENSITIVE=false
+TOOL_RETRY_ENABLED=false
+TOOL_MAX_RETRIES=1
+TOOL_RETRY_BACKOFF_MS=250
+TOOL_RECOVERY_ON_STARTUP=true
+TOOL_STALE_EXECUTION_SECONDS=300
+
+# Web search (Phase 11E). Disabled by default.
+# searxng: self-hosted, no API key, requires format=json on the instance.
+# tavily: managed API, requires WEB_SEARCH_API_KEY.
+WEB_SEARCH_ENABLED=false
+WEB_SEARCH_PROVIDER=searxng
+WEB_SEARCH_BASE_URL=
+WEB_SEARCH_API_KEY=
+WEB_SEARCH_TIMEOUT_SECONDS=10
+WEB_SEARCH_MAX_RESULTS=5
+WEB_SEARCH_MAX_RESPONSE_BYTES=262144
+
+# Filesystem tools (Phase 11F). Disabled by default.
+# Comma-separated absolute directories that may be accessed.
+TOOL_FILESYSTEM_ENABLED=false
+TOOL_WORKSPACE_ROOTS=
+TOOL_FILE_MAX_READ_BYTES=200000
+TOOL_FILE_MAX_WRITE_BYTES=100000
+TOOL_FILE_MAX_LIST_ENTRIES=500
+TOOL_FILE_MAX_SEARCH_RESULTS=100
+
+# Python execution sandbox (Phase 11G). Disabled by default.
+# Requires Windows AppContainer, a standalone Python 3 interpreter, and
+# TOOL_ALLOW_SENSITIVE=true plus per-call confirmation.
+PYTHON_SANDBOX_ENABLED=false
+PYTHON_SANDBOX_TIMEOUT_SECONDS=5
+PYTHON_SANDBOX_CPU_SECONDS=5
+PYTHON_SANDBOX_MEMORY_MB=256
+PYTHON_SANDBOX_MAX_SOURCE_BYTES=20000
+PYTHON_SANDBOX_MAX_OUTPUT_BYTES=20000
+# Network access is not supported by the backend. Keep false.
+PYTHON_SANDBOX_ALLOW_NETWORK=false
+# Empty uses the system temporary directory for disposable workspaces.
+PYTHON_SANDBOX_WORKSPACE_PARENT=
+
 # Explicit frontend origins (empty for same-origin) and Host allowlist
 CORS_ALLOWED_ORIGINS=
 TRUSTED_HOSTS=localhost,127.0.0.1,::1,testserver,test
@@ -569,6 +956,58 @@ real provider call):
 ```powershell
 cd backend
 ..\venv\Scripts\python.exe -m unittest tests.test_phase11b_tool_calling -v
+```
+
+Phase 11C tool execution engine checks (mocked tools and in-memory SQLite):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11c_executor -v
+```
+
+Phase 11D permission and confirmation checks (mocked tools, in-memory SQLite,
+real authentication and CSRF):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11d_permissions -v
+```
+
+Phase 11E web search checks (mocked HTTP transport; no real search request):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11e_web_search -v
+```
+
+Phase 11F filesystem checks (temporary directories only; no personal files):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11f_filesystem -v
+```
+
+Phase 11G Python sandbox checks (config/unit/executor tests everywhere; real
+AppContainer integration tests on supported Windows hosts):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11g_python_sandbox -v
+```
+
+Phase 11H chat/API tool-calling checks (mocked providers and tools; in-memory
+SQLite):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11h_tool_calling_api -v
+```
+
+Combined Phase 11A–11H checks:
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase11a_base tests.test_phase11a_registry tests.test_phase11b_tool_calling tests.test_phase11c_executor tests.test_phase11d_permissions tests.test_phase11e_web_search tests.test_phase11f_filesystem tests.test_phase11g_python_sandbox tests.test_phase11h_tool_calling_api -v
 ```
 
 Phase 10B–10H scheduler, notification, recurrence, preference, integration,

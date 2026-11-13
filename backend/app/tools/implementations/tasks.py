@@ -80,6 +80,7 @@ class TaskListTool(BaseTool):
     )
     category: ClassVar[ToolCategory] = ToolCategory.READ_ONLY
     input_model: ClassVar[type[StrictModel]] = TaskListInput
+    idempotent: ClassVar[bool] = True
     output_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {
@@ -131,6 +132,7 @@ class TaskGetTool(BaseTool):
     )
     category: ClassVar[ToolCategory] = ToolCategory.READ_ONLY
     input_model: ClassVar[type[StrictModel]] = TaskGetInput
+    idempotent: ClassVar[bool] = True
 
     async def execute(
         self,

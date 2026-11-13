@@ -45,6 +45,30 @@ def _is_private_message(message) -> bool:
     return bool(value)
 
 
+def _is_tool_event_message(message) -> bool:
+    """Return whether a stored message is an internal tool transcript entry.
+
+    Tool-call and tool-result rows are persisted for auditability and display.
+    They are not conversational assistant text, so they must never be replayed
+    into a provider prompt as if the assistant had said them.
+    """
+
+    metadata = getattr(message, "message_metadata", None)
+
+    if metadata is None and isinstance(message, dict):
+        metadata = message.get("message_metadata")
+
+    if not isinstance(metadata, dict):
+        return False
+
+    return metadata.get("kind") in {
+        "tool_call",
+        "tool_result",
+        "tool_confirmation_required",
+        "tool_rejected",
+    }
+
+
 class HistoryContextProvider:
     """Provide bounded short-term conversation history."""
 
@@ -70,6 +94,15 @@ class HistoryContextProvider:
             role = getattr(role, "value", role)
 
             if role is None or content is None:
+                continue
+
+            if _is_tool_event_message(message):
+                continue
+
+            if str(getattr(role, "value", role)).lower() not in {
+                "user",
+                "assistant",
+            }:
                 continue
 
             entries.append(

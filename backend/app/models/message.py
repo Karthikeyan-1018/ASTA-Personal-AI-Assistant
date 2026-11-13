@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Enum as SAEnum,
@@ -83,6 +84,14 @@ class Message(Base):
         nullable=False,
         default=False,
         server_default=false()
+    )
+
+    # Safe, structured metadata for special message kinds. Tool activity is
+    # recorded here (call ids, tool names, statuses) without storing argument
+    # values, tool output, file contents, or credentials.
+    message_metadata: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True
     )
 
     conversation: Mapped["Conversation"] = relationship(

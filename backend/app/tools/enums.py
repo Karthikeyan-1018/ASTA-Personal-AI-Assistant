@@ -23,13 +23,42 @@ class ToolCategory(str, enum.Enum):
 
 
 class ToolExecutionStatus(str, enum.Enum):
-    """Terminal status of one execution attempt."""
+    """Outcome status of one execution attempt.
 
+    ``PENDING`` and ``RUNNING`` describe an in-flight attempt. Every completed
+    attempt still ends in one of the original terminal values, so existing
+    history readers and API clients keep working. ``CANCELLED`` records a
+    cooperative cancellation or an attempt interrupted by a restart.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
     SUCCESS = "success"
     ERROR = "error"
     TIMEOUT = "timeout"
     DENIED = "denied"
     CONFIRMATION_REQUIRED = "confirmation_required"
+    CANCELLED = "cancelled"
+
+
+class ToolExecutionLifecycle(str, enum.Enum):
+    """Fine-grained lifecycle state for a tool execution attempt.
+
+    ``status`` remains the coarse outcome used by existing callers. This enum
+    models the full lifecycle so transitions can be validated and interrupted
+    executions can be recovered after a restart.
+    """
+
+    PENDING = "pending"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    APPROVED = "approved"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
 
 
 class ToolConfirmationStatus(str, enum.Enum):
@@ -74,5 +103,6 @@ __all__ = [
     "ToolCategory",
     "ToolConfirmationStatus",
     "ToolErrorCategory",
+    "ToolExecutionLifecycle",
     "ToolExecutionStatus",
 ]

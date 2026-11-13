@@ -467,6 +467,19 @@ class ChatService:
 
         if conversation is not None:
 
+            # Persist the safe tool transcript first so message ordering is
+            # stable: the tool call/result entries appear before the assistant
+            # answer that summarises them. The transcript is metadata-only and
+            # is excluded from future prompt history.
+            await conversation_service.add_tool_events(
+                session=session,
+                conversation=conversation,
+                events=result.get("tool_events"),
+                provider=result.get("provider"),
+                model=result.get("model"),
+                is_private=private,
+            )
+
             try:
                 await conversation_service.add_message(
                     session=session,

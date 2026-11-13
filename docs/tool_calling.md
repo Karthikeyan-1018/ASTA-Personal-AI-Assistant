@@ -5,7 +5,8 @@
 Phase 11B connects ASTA's hybrid Groq + Ollama router to the tool registry from
 Phase 11A. It lets the model request a registered tool by name and arguments,
 without executing anything. Execution, authorization, confirmations, and history
-remain in Phase 11C.
+are implemented by the Phase 11C executor (see
+[`tool_execution.md`](tool_execution.md)).
 
 The boundary is deliberately narrow:
 
@@ -145,18 +146,26 @@ adds `tool_calls` and `tool_call_schemas` keys, and a text-only
 `generate_with_tools()` turn returns the same `response` content with empty
 call lists.
 
-## Relationship to Phase 11C
+## Relationship to Phases 11C and 11D
 
-Phase 11C owns:
+Phase 11C consumes the normalized call objects produced here:
 
-1. `ToolCall` argument validation against the tool's Pydantic model.
-2. Permission and confirmation policy.
-3. `BaseTool.execute()` with timeout and result bounds.
-4. Execution history and pending confirmations.
+1. `ToolCall` argument shape and size checks, then validation against the
+   tool's Pydantic model.
+2. Permission, privacy, enablement, and confirmation policy.
+3. `BaseTool.execute()` with timeout, cancellation handling, and result bounds.
+4. Execution history, credential redaction, and pending confirmations.
 
-Phase 11B only resolves provider responses into validated call objects. It
-cannot authorize, confirm, or execute anything, and it does not touch the
-database.
+Phase 11D hardens the same path: confirmations are bound to the authenticated
+owner, conversation, tool name, and canonical argument digest; approval is
+single-use; and the stored payload is revalidated and reauthorized after the
+claim. Phase 11B itself only resolves provider responses into validated call
+objects. It cannot authorize, confirm, or execute anything, and it does not
+touch the database. A malformed call remains a structured error that Phase 11C
+reports without executing anything. See
+[`tool_execution.md`](tool_execution.md) for the executor lifecycle and
+[`tool_permissions_and_confirmations.md`](tool_permissions_and_confirmations.md)
+for the Phase 11D policy.
 
 ## Configuration
 

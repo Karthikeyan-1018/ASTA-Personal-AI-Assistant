@@ -1,6 +1,7 @@
 """Pydantic schemas for conversation persistence."""
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -67,6 +68,7 @@ class MessageResponse(BaseModel):
     provider: str | None = None
     model: str | None = None
     is_private: bool = False
+    message_metadata: dict[str, Any] | None = None
     created_at: datetime
 
 

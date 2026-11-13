@@ -70,6 +70,9 @@ class ToolResult:
     duration_ms: float | None = None
     result_bytes: int | None = None
     provider: str | None = None
+    retry_count: int = 0
+    execution_id: int | None = None
+    idempotent_replay: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -90,6 +93,9 @@ class ToolResult:
             "duration_ms": self.duration_ms,
             "result_bytes": self.result_bytes,
             "provider": self.provider,
+            "retry_count": int(self.retry_count or 0),
+            "execution_id": self.execution_id,
+            "idempotent_replay": bool(self.idempotent_replay),
             "metadata": _json_safe(self.metadata),
         }
 

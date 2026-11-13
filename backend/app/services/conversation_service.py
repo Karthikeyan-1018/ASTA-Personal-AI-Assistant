@@ -58,6 +58,114 @@ def derive_title(content: str) -> str:
     return cleaned[:MAX_DERIVED_TITLE_CHARS].rstrip() + "..."
 
 
+
+_TOOL_EVENT_KINDS = frozenset(
+    {
+        "tool_call",
+        "tool_result",
+        "tool_confirmation_required",
+        "tool_rejected",
+    }
+)
+
+_TOOL_EVENT_METADATA_KEYS = frozenset(
+    {
+        "call_id",
+        "tool",
+        "status",
+        "success",
+        "error_code",
+        "confirmation_id",
+        "truncated",
+        "result_bytes",
+        "tool_calls",
+    }
+)
+
+_MAX_TOOL_EVENT_CONTENT_CHARS = 4000
+_MAX_TOOL_CALLS_PER_EVENT = 16
+_MAX_TOOL_EVENT_STRING_CHARS = 200
+
+
+def _safe_event_scalar(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, str):
+        return value[:_MAX_TOOL_EVENT_STRING_CHARS]
+
+    return None
+
+
+def _clean_tool_event(event: dict | None) -> dict | None:
+    """Return a bounded, metadata-only transcript entry, or ``None``."""
+
+    if not isinstance(event, dict):
+        return None
+
+    kind = str(event.get("kind") or "").strip().lower()
+
+    if kind not in _TOOL_EVENT_KINDS:
+        return None
+
+    content = str(event.get("content") or "").strip()
+
+    if not content:
+        return None
+
+    # Defence in depth: transcript content is synthesized by the orchestrator
+    # and never contains raw tool output, but redaction protects a future
+    # caller from accidentally passing a credential-shaped summary.
+    try:
+        from app.tools.result import redact_secrets
+
+        content = str(redact_secrets(content))
+    except Exception:
+        pass
+
+    metadata: dict = {"kind": kind}
+
+    for key, value in event.items():
+        if key in {"kind", "content"} or key not in _TOOL_EVENT_METADATA_KEYS:
+            continue
+
+        if key == "tool_calls":
+            calls = []
+
+            if isinstance(value, (list, tuple)):
+                for call in value[:_MAX_TOOL_CALLS_PER_EVENT]:
+                    if not isinstance(call, dict):
+                        continue
+
+                    entry = {
+                        "id": _safe_event_scalar(call.get("id")),
+                        "name": _safe_event_scalar(call.get("name")),
+                    }
+
+                    keys = call.get("argument_keys")
+
+                    if isinstance(keys, (list, tuple)):
+                        entry["argument_keys"] = [
+                            str(item)[:_MAX_TOOL_EVENT_STRING_CHARS]
+                            for item in keys[:32]
+                            if isinstance(item, str)
+                        ]
+
+                    calls.append(entry)
+
+            if calls:
+                metadata["tool_calls"] = calls
+
+            continue
+
+        metadata[key] = _safe_event_scalar(value)
+
+    return {
+        "content": content[:_MAX_TOOL_EVENT_CONTENT_CHARS],
+        "metadata": metadata,
+    }
+
+
 class ConversationService:
     """Asynchronous, user-scoped conversation persistence."""
 
@@ -192,7 +300,8 @@ class ConversationService:
         content: str,
         provider: str | None = None,
         model: str | None = None,
-        is_private: bool = False
+        is_private: bool = False,
+        message_metadata: dict | None = None,
     ) -> Message:
 
         cleaned = (content or "").strip()
@@ -208,7 +317,8 @@ class ConversationService:
             content=cleaned,
             provider=provider,
             model=model,
-            is_private=is_private
+            is_private=is_private,
+            message_metadata=message_metadata,
         )
 
         conversation.updated_at = _utcnow()
@@ -228,6 +338,67 @@ class ConversationService:
             raise
 
         return message
+
+    async def add_tool_events(
+        self,
+        session: AsyncSession,
+        conversation: Conversation,
+        events: list[dict] | None,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        is_private: bool = False,
+    ) -> list[Message]:
+        """Persist a batch of safe tool transcript entries in order.
+
+        Events are intentionally metadata-only. Any value that is not a safe
+        scalar, string, or list of safe scalars is dropped before it reaches the
+        database. A partial write is rolled back so the transcript cannot be
+        left in an inconsistent order.
+        """
+
+        cleaned = [
+            _clean_tool_event(event)
+            for event in (events or [])
+            if isinstance(event, dict)
+        ]
+        cleaned = [event for event in cleaned if event is not None]
+
+        if not cleaned:
+            return []
+
+        messages = [
+            Message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT,
+                content=event["content"],
+                provider=provider,
+                model=model,
+                is_private=is_private,
+                message_metadata=event["metadata"],
+            )
+            for event in cleaned
+        ]
+
+        conversation.updated_at = _utcnow()
+
+        try:
+            session.add_all(messages)
+            await session.commit()
+            await session.refresh(conversation)
+
+            for message in messages:
+                await session.refresh(message)
+
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "Failed to persist tool transcript for conversation %s.",
+                conversation.id,
+            )
+            return []
+
+        return messages
 
     async def get_messages(
         self,

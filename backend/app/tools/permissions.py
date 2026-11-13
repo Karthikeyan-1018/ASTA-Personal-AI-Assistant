@@ -93,8 +93,13 @@ class PermissionPolicy:
 
         return PermissionDecision(
             allowed=True,
-            requires_confirmation=False,
+            requires_confirmation=bool(tool.requires_confirmation),
             category=tool.category,
+            reason=(
+                "This action requires explicit confirmation."
+                if tool.requires_confirmation
+                else None
+            ),
         )
 
     def require_allowed(

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum as SAEnum,
@@ -32,6 +33,7 @@ from app.tools.enums import (
     ToolCategory,
     ToolConfirmationStatus,
     ToolErrorCategory,
+    ToolExecutionLifecycle,
     ToolExecutionStatus,
 )
 
@@ -88,6 +90,15 @@ class ToolExecution(Base):
     status: Mapped[ToolExecutionStatus] = mapped_column(
         _tool_enum(ToolExecutionStatus, "tool_execution_status"),
         nullable=False,
+        default=ToolExecutionStatus.PENDING,
+        server_default=ToolExecutionStatus.PENDING.value,
+    )
+
+    lifecycle_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=ToolExecutionLifecycle.PENDING.value,
+        server_default=ToolExecutionLifecycle.PENDING.value,
     )
 
     confirmation_status: Mapped[ConfirmationState] = mapped_column(
@@ -95,6 +106,37 @@ class ToolExecution(Base):
         nullable=False,
         default=ConfirmationState.NOT_REQUIRED,
         server_default=ConfirmationState.NOT_REQUIRED.value,
+    )
+
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    retry_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    truncated: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+
+    # A client-supplied idempotency key is stored as a SHA-256 digest. The
+    # original header value is never retained.
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
     )
 
     duration_ms: Mapped[int | None] = mapped_column(
@@ -139,6 +181,16 @@ class ToolExecution(Base):
         nullable=False,
     )
 
+    @property
+    def success(self) -> bool:
+        """Return whether the attempt completed successfully.
+
+        This is a derived property so API responses do not have to duplicate
+        outcome logic. It never exposes the result payload.
+        """
+
+        return self.status == ToolExecutionStatus.SUCCESS
+
     __table_args__ = (
         CheckConstraint(
             "duration_ms IS NULL OR duration_ms >= 0",
@@ -147,6 +199,17 @@ class ToolExecution(Base):
         CheckConstraint(
             "result_bytes IS NULL OR result_bytes >= 0",
             name="ck_tool_executions_result_bytes_non_negative",
+        ),
+        CheckConstraint(
+            "retry_count >= 0",
+            name="ck_tool_executions_retry_count_non_negative",
+        ),
+        CheckConstraint(
+            "lifecycle_status IN ("
+            "'pending', 'awaiting_confirmation', 'approved', 'running', "
+            "'succeeded', 'failed', 'rejected', 'expired', 'cancelled', "
+            "'timed_out')",
+            name="tool_execution_lifecycle",
         ),
         Index(
             "ix_tool_executions_user_created",
@@ -159,6 +222,22 @@ class ToolExecution(Base):
             "tool_name",
         ),
         Index("ix_tool_executions_status", "status"),
+        Index(
+            "ix_tool_executions_user_lifecycle",
+            "user_id",
+            "lifecycle_status",
+        ),
+        Index(
+            "ix_tool_executions_lifecycle_started",
+            "lifecycle_status",
+            "started_at",
+        ),
+        Index(
+            "ux_tool_executions_user_idempotency_key",
+            "user_id",
+            "idempotency_key",
+            unique=True,
+        ),
     )
 
 

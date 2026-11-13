@@ -36,6 +36,11 @@ class ToolContext:
     private: bool = False
     provider: str | None = None
 
+    # Set by the executor for the duration of one attempt. It is always
+    # overwritten at the start of the next call, so a reused context cannot
+    # attach a later result to an earlier history row.
+    execution_id: int | None = None
+
     def require_user_id(self) -> int:
         if (
             not isinstance(self.user_id, int)
@@ -67,6 +72,11 @@ class BaseTool(ABC):
 
     # Safe label stored in execution history. Never a credential.
     provider_label: ClassVar[str | None] = None
+
+    # A tool may opt in to bounded retries for transient failures. Only
+    # genuinely idempotent operations (reads and searches) should set this.
+    # Confirmation-requiring tools are never retried automatically.
+    idempotent: ClassVar[bool] = False
 
     @property
     def enabled(self) -> bool:

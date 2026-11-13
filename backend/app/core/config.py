@@ -691,10 +691,29 @@ class Settings:
         os.getenv("TOOL_MAX_CALLS_PER_REQUEST", "5")
     )
 
+    # Bound the number of calls accepted from a single assistant turn. A
+    # provider can return several calls at once; extras are rejected with a
+    # explicit tool result instead of being executed silently.
+    TOOL_MAX_CALLS_PER_TURN: int = int(
+        os.getenv("TOOL_MAX_CALLS_PER_TURN", "8")
+    )
+
     # One initial provider turn plus one final response turn. This bound
     # prevents a model from looping indefinitely.
     TOOL_MAX_ROUNDS: int = int(
         os.getenv("TOOL_MAX_ROUNDS", "2")
+    )
+
+    # Total bytes of tool-result content fed back to the model across all
+    # rounds. Individual results are already bounded by TOOL_MAX_RESULT_BYTES.
+    TOOL_MAX_RESULT_CONTEXT_BYTES: int = int(
+        os.getenv("TOOL_MAX_RESULT_CONTEXT_BYTES", "50000")
+    )
+
+    # Refuse to re-execute an identical tool call within one request. This
+    # complements the hard round and call limits.
+    TOOL_LOOP_PREVENTION_ENABLED: bool = (
+        os.getenv("TOOL_LOOP_PREVENTION_ENABLED", "true").lower() == "true"
     )
 
     TOOL_EXECUTION_TIMEOUT_SECONDS: int = int(
@@ -723,6 +742,31 @@ class Settings:
 
     TOOL_HISTORY_ENABLED: bool = (
         os.getenv("TOOL_HISTORY_ENABLED", "true").lower() == "true"
+    )
+
+    # Retries are opt-in and apply only to tools that explicitly declare
+    # themselves idempotent. Confirmation-requiring tools are never retried.
+    TOOL_RETRY_ENABLED: bool = (
+        os.getenv("TOOL_RETRY_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_MAX_RETRIES: int = int(
+        os.getenv("TOOL_MAX_RETRIES", "1")
+    )
+
+    TOOL_RETRY_BACKOFF_MS: int = int(
+        os.getenv("TOOL_RETRY_BACKOFF_MS", "250")
+    )
+
+    # On startup, stale in-flight rows from a previous process are marked
+    # cancelled. The cutoff protects a concurrently running worker in a
+    # multi-process deployment; ASTA normally runs one process.
+    TOOL_RECOVERY_ON_STARTUP: bool = (
+        os.getenv("TOOL_RECOVERY_ON_STARTUP", "true").lower() == "true"
+    )
+
+    TOOL_STALE_EXECUTION_SECONDS: int = int(
+        os.getenv("TOOL_STALE_EXECUTION_SECONDS", "300")
     )
 
     # Sensitive tools (arbitrary HTTP mutations, Python execution, future
@@ -757,6 +801,12 @@ class Settings:
 
     WEB_SEARCH_MAX_RESULTS: int = int(
         os.getenv("WEB_SEARCH_MAX_RESULTS", "5")
+    )
+
+    # Bound the provider response before JSON parsing so a malformed or
+    # hostile endpoint cannot exhaust process memory.
+    WEB_SEARCH_MAX_RESPONSE_BYTES: int = int(
+        os.getenv("WEB_SEARCH_MAX_RESPONSE_BYTES", "262144")
     )
 
     # Local filesystem tools. Access is limited to explicitly approved roots.
@@ -815,30 +865,63 @@ class Settings:
         ""
     ).strip()
 
-    # Python execution is disabled and is not a hardened sandbox on Windows.
-    # Enabling it requires both flags below and is documented as unsafe.
-    PYTHON_EXECUTION_ENABLED: bool = (
-        os.getenv("PYTHON_EXECUTION_ENABLED", "false").lower() == "true"
-    )
-
-    PYTHON_EXECUTION_ALLOW_UNSAFE: bool = (
+    # Python execution sandbox (Windows AppContainer + Job Object). Disabled by
+    # default and requires TOOL_ALLOW_SENSITIVE plus per-call confirmation.
+    # The deprecated PYTHON_EXECUTION_* names are still read as fallbacks so an
+    # existing deployment keeps its limits when it migrates; the old
+    # PYTHON_EXECUTION_ALLOW_UNSAFE flag no longer enables an unsafe runner.
+    PYTHON_SANDBOX_ENABLED: bool = (
         os.getenv(
-            "PYTHON_EXECUTION_ALLOW_UNSAFE",
-            "false",
-        ).lower() == "true"
+            "PYTHON_SANDBOX_ENABLED",
+            os.getenv("PYTHON_EXECUTION_ENABLED", "false"),
+        ).lower()
+        == "true"
     )
 
-    PYTHON_EXECUTION_TIMEOUT_SECONDS: int = int(
-        os.getenv("PYTHON_EXECUTION_TIMEOUT_SECONDS", "5")
+    PYTHON_SANDBOX_TIMEOUT_SECONDS: int = int(
+        os.getenv(
+            "PYTHON_SANDBOX_TIMEOUT_SECONDS",
+            os.getenv("PYTHON_EXECUTION_TIMEOUT_SECONDS", "5"),
+        )
     )
 
-    PYTHON_EXECUTION_MAX_CODE_BYTES: int = int(
-        os.getenv("PYTHON_EXECUTION_MAX_CODE_BYTES", "20000")
+    # Wall-clock timeout is clamped below TOOL_EXECUTION_TIMEOUT_SECONDS so the
+    # sandbox can terminate its process tree before the executor cancels.
+    PYTHON_SANDBOX_CPU_SECONDS: int = int(
+        os.getenv("PYTHON_SANDBOX_CPU_SECONDS", "5")
     )
 
-    PYTHON_EXECUTION_MAX_OUTPUT_BYTES: int = int(
-        os.getenv("PYTHON_EXECUTION_MAX_OUTPUT_BYTES", "20000")
+    PYTHON_SANDBOX_MEMORY_MB: int = int(
+        os.getenv("PYTHON_SANDBOX_MEMORY_MB", "256")
     )
+
+    PYTHON_SANDBOX_MAX_SOURCE_BYTES: int = int(
+        os.getenv(
+            "PYTHON_SANDBOX_MAX_SOURCE_BYTES",
+            os.getenv("PYTHON_EXECUTION_MAX_CODE_BYTES", "20000"),
+        )
+    )
+
+    PYTHON_SANDBOX_MAX_OUTPUT_BYTES: int = int(
+        os.getenv(
+            "PYTHON_SANDBOX_MAX_OUTPUT_BYTES",
+            os.getenv("PYTHON_EXECUTION_MAX_OUTPUT_BYTES", "20000"),
+        )
+    )
+
+    # Network access is denied by the AppContainer token. This flag exists so
+    # an operator can request it explicitly, but a true value fails closed
+    # because the backend cannot grant network capabilities.
+    PYTHON_SANDBOX_ALLOW_NETWORK: bool = (
+        os.getenv("PYTHON_SANDBOX_ALLOW_NETWORK", "false").lower() == "true"
+    )
+
+    # Optional existing directory that will contain per-execution workspaces.
+    # Empty means the system temporary directory.
+    PYTHON_SANDBOX_WORKSPACE_PARENT: str = os.getenv(
+        "PYTHON_SANDBOX_WORKSPACE_PARENT",
+        "",
+    ).strip()
 
     @property
     def tool_workspace_roots(self) -> list[str]:

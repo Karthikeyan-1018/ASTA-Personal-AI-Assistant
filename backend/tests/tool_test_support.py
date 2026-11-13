@@ -135,6 +135,7 @@ class ToolEngineTestBase(unittest.IsolatedAsyncioTestCase):
         user_id=None,
         confirmation_id=None,
         create_confirmation=True,
+        idempotency_key=None,
     ):
         async with self.SessionLocal() as session:
             context = await self.context(session, user_id)
@@ -144,4 +145,5 @@ class ToolEngineTestBase(unittest.IsolatedAsyncioTestCase):
                 context=context,
                 confirmation_id=confirmation_id,
                 create_confirmation=create_confirmation,
+                idempotency_key=idempotency_key,
             )

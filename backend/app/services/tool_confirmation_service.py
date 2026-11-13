@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.tool_execution import ToolConfirmation
+from app.services.tool_metrics_service import tool_metrics_service
 from app.tools.enums import ToolCategory, ToolConfirmationStatus
 from app.tools.exceptions import (
     ToolConfirmationExpiredError,
@@ -215,11 +216,16 @@ class ToolConfirmationService:
         confirmation_id: int,
         expected_tool_name: str | None = None,
         expected_arguments: dict[str, Any] | None = None,
+        expected_conversation_id: int | None = None,
     ) -> ClaimedConfirmation:
         """Atomically consume a pending confirmation.
 
         Only one caller can win the ``pending -> executed`` transition. A
         failed or replayed confirm therefore cannot execute a second time.
+
+        A confirmation created inside a conversation remains bound to that
+        conversation: a caller presenting a different conversation id is
+        rejected even when it owns the confirmation row.
         """
 
         confirmation = await self.get(
@@ -256,6 +262,14 @@ class ToolConfirmationService:
         ):
             raise ToolConfirmationMismatchError(
                 "That confirmation belongs to a different tool."
+            )
+
+        if (
+            confirmation.conversation_id is not None
+            and expected_conversation_id != confirmation.conversation_id
+        ):
+            raise ToolConfirmationMismatchError(
+                "That confirmation belongs to a different conversation."
             )
 
         digest = arguments_digest(confirmation.arguments or {})
@@ -390,6 +404,15 @@ class ToolConfirmationService:
             )
 
         await session.commit()
+
+        try:
+            tool_metrics_service.record_confirmation_rejection()
+
+        except Exception:
+            logger.debug(
+                "Failed to record confirmation rejection metrics.",
+                exc_info=True,
+            )
 
         return await self.get(
             session=session,

@@ -7,6 +7,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from contextlib import asynccontextmanager
+import logging
 
 from app.api.ai_usage import router as ai_usage_router
 from app.api.auth import router as auth_router
@@ -22,7 +23,12 @@ from app.api.task_actions import router as task_actions_router
 from app.api.tasks import router as tasks_router
 from app.api.tools import router as tools_router
 from app.core.config import settings
+from app.database.connection import AsyncSessionLocal
 from app.scheduler.runner import BackgroundScheduler
+from app.services.tool_history_service import tool_history_service
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,9 +38,32 @@ async def lifespan(app: FastAPI):
     Worker failures are isolated from request handling. When the scheduler is
     disabled the API still operates normally; due work remains in the database
     and is picked up when a scheduler is enabled again.
+
+    Stale in-flight tool executions from a previous process are marked
+    cancelled so they cannot remain ``running`` forever. Recovery is best
+    effort and never prevents the API from starting.
     """
 
     scheduler: BackgroundScheduler | None = None
+
+    if settings.TOOL_RECOVERY_ON_STARTUP:
+        try:
+            async with AsyncSessionLocal() as session:
+                recovered = await tool_history_service.recover_interrupted(
+                    session=session
+                )
+
+                if recovered:
+                    logger.warning(
+                        "Marked %s interrupted tool execution(s) as cancelled "
+                        "on startup.",
+                        recovered,
+                    )
+
+        except Exception:
+            logger.exception(
+                "Tool execution recovery failed on startup; continuing."
+            )
 
     if settings.REMINDER_SCHEDULER_ENABLED:
         scheduler = BackgroundScheduler()
@@ -71,7 +100,12 @@ if settings.cors_origins:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-        allow_headers=["Content-Type", "X-CSRF-Token", "X-Setup-Token"],
+        allow_headers=[
+            "Content-Type",
+            "X-CSRF-Token",
+            "X-Setup-Token",
+            "Idempotency-Key",
+        ],
         max_age=600,
     )
 

@@ -285,12 +285,22 @@ def _coerce_history_item(item: object) -> tuple[str, str] | None:
 
     role = getattr(item, "role", None)
     content = getattr(item, "content", None)
+    metadata = getattr(item, "message_metadata", None)
 
     if role is None and isinstance(item, dict):
         role = item.get("role")
         content = item.get("content")
+        metadata = item.get("message_metadata")
 
     if role is None:
+        return None
+
+    if isinstance(metadata, dict) and metadata.get("kind") in {
+        "tool_call",
+        "tool_result",
+        "tool_confirmation_required",
+        "tool_rejected",
+    }:
         return None
 
     role = getattr(role, "value", role)

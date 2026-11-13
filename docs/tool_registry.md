@@ -7,8 +7,9 @@ manage tools without executing them. A tool is a typed Python capability with a
 stable name, a description, argument and result contracts, and permission
 metadata. The registry is the single source of truth for those definitions.
 
-Phase 11A deliberately stops at registration and discovery. Argument validation
-and execution belong to Phase 11C. Provider tool-call parsing and chat
+Phase 11A deliberately stops at registration and discovery. Argument validation,
+policy enforcement, confirmation, and execution belong to Phase 11C (see
+[`tool_execution.md`](tool_execution.md)). Provider tool-call parsing and chat
 orchestration belong to Phase 11B (see
 [`tool_calling.md`](tool_calling.md)).
 
@@ -40,6 +41,9 @@ orchestration belong to Phase 11B (see
 | `app/tools/schemas.py` | `StrictModel`, `ToolCall`, `ToolDefinition`, and the execution result schema. |
 | `app/tools/base.py` | `BaseTool`, `ToolContext`, and the shared preview helper. |
 | `app/tools/registry.py` | Registration, validation, discovery, enabled/disabled views, and provider definitions. |
+| `app/tools/permissions.py` | Server-side category, privacy, enablement, and confirmation policy. |
+| `app/tools/executor.py` | Central execution engine: context checks, validation, confirmation, timeout, result bounds, and history. |
+| `app/tools/result.py` | Normalized success/error results plus credential redaction and size limits. |
 | `app/tools/definitions/` | Built-in tool registrations. |
 | `app/tools/implementations/` | Concrete tool implementations, added in later phases. |
 
@@ -188,13 +192,14 @@ pretending the tool does not exist.
 
 Phase 11A records permission metadata but does not enforce it. Enforcement is
 centralized in `app/tools/permissions.py` and applied by the executor in Phase
-11C.
+11C and hardened in Phase 11D.
 
 - `read_only` — no stored-data mutation.
 - `reversible` — a mutation that may require confirmation.
 - `sensitive` — high-impact actions; deployment policy may deny them.
 - `allowed_in_private` — controls private-request visibility.
-- `requires_confirmation` — forces confirmation for reversible actions.
+- `requires_confirmation` — forces confirmation for any category, including
+  `read_only`.
 
 The model never supplies `user_id`, `private`, or a permission decision. Those
 values come from the trusted server-side `ToolContext`.
@@ -224,7 +229,7 @@ import tool enums, while tool implementations import services that import ORM
 models. The loader is protected by a re-entrant lock, so concurrent discovery
 cannot partially initialize the global registry.
 
-## Relationship to Phase 11B and 11C
+## Relationship to Phases 11B, 11C, and 11D
 
 Phase 11B:
 
@@ -234,12 +239,26 @@ Phase 11B:
    objects;
 4. resolves each valid name with `registry.get(name)` in the orchestrator.
 
-Phase 11C:
+Phase 11C and 11D:
 
-1. validates arguments with `BaseTool.validate_arguments()`;
-2. enforces permission and confirmation policy;
-3. calls `BaseTool.execute()`;
-4. normalizes and bounds the result.
+1. validates argument shape and size, then calls `BaseTool.validate_arguments()`;
+2. enforces permission, privacy, enablement, and confirmation policy before
+   argument details are disclosed;
+3. creates or claims a single-use confirmation bound to the owner, conversation,
+   tool name, and exact arguments;
+4. revalidates the stored payload and reruns policy after a claim;
+5. calls `BaseTool.execute()` with a configured timeout;
+6. normalizes, redacts, and bounds the result;
+7. records metadata-only history and returns a `ToolResult`.
+
+Phase 11D makes `requires_confirmation` effective for every category and adds
+conversation binding, replay and duplicate rejection, and post-claim
+revalidation and reauthorization.
+
+See [`tool_execution.md`](tool_execution.md) for the complete execution
+lifecycle, statuses, security properties, and configuration, and
+[`tool_permissions_and_confirmations.md`](tool_permissions_and_confirmations.md)
+for the Phase 11D authority and confirmation model.
 
 Phase 11A intentionally contains no provider calls, no database access, no
 migrations, and no execution side effects.
@@ -265,5 +284,5 @@ integration, and async execution compatibility.
 - Enablement is derived from configuration or tool implementation state; there
   is no runtime administrative toggle endpoint in Phase 11A.
 - Output schemas are descriptive metadata, not runtime result validation.
-- Tool execution, timeouts, confirmations, history, and provider tool-calling
-  are deferred to Phases 11B and 11C.
+- Tool execution, timeouts, confirmations, and history are implemented in Phase
+  11C; provider tool-calling is implemented in Phase 11B.
