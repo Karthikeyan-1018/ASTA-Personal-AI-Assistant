@@ -11,6 +11,7 @@ import logging
 
 from app.api.ai_usage import router as ai_usage_router
 from app.api.auth import router as auth_router
+from app.api.background_tasks import router as background_tasks_router
 from app.api.health import router as health_router
 from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
@@ -25,6 +26,7 @@ from app.api.tools import router as tools_router
 from app.core.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.scheduler.runner import BackgroundScheduler
+from app.services.background_task_service import background_task_service
 from app.services.tool_history_service import tool_history_service
 from app.tools import os_security
 
@@ -76,6 +78,40 @@ async def lifespan(app: FastAPI):
                 "Tool execution recovery failed on startup; continuing."
             )
 
+    # Phase 13: resolve durable task rows left behind by a previous process.
+    # Running work cannot be resumed safely, so it becomes failed; queued work
+    # becomes cancelled. Nothing is retried automatically.
+    if (
+        settings.BACKGROUND_TASKS_ENABLED
+        and settings.BACKGROUND_TASK_RECOVERY_ON_STARTUP
+    ):
+        try:
+            async with AsyncSessionLocal() as session:
+                recovered = await background_task_service.recover_interrupted(
+                    session
+                )
+
+                if recovered["failed"] or recovered["cancelled"]:
+                    logger.warning(
+                        "Background task recovery: %s running task(s) marked "
+                        "failed and %s queued task(s) marked cancelled.",
+                        recovered["failed"],
+                        recovered["cancelled"],
+                    )
+
+                purged = await background_task_service.purge_expired(session)
+
+                if purged:
+                    logger.info(
+                        "Purged %s expired background task(s).",
+                        purged,
+                    )
+
+        except Exception:
+            logger.exception(
+                "Background task recovery failed on startup; continuing."
+            )
+
     if settings.REMINDER_SCHEDULER_ENABLED:
         scheduler = BackgroundScheduler()
         await scheduler.start()
@@ -86,6 +122,15 @@ async def lifespan(app: FastAPI):
     finally:
         if scheduler is not None:
             await scheduler.stop()
+
+        if settings.BACKGROUND_TASKS_ENABLED:
+            try:
+                await background_task_service.shutdown()
+
+            except Exception:
+                logger.exception(
+                    "Background task shutdown failed; continuing."
+                )
 
 
 app = FastAPI(
@@ -162,6 +207,7 @@ app.include_router(recurrences_router)
 
 app.include_router(task_actions_router)
 app.include_router(tools_router)
+app.include_router(background_tasks_router)
 
 
 @app.get("/")

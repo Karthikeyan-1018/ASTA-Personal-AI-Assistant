@@ -73,16 +73,27 @@ class FailingTool(BaseTool):
 class ToolEngineTestBase(unittest.IsolatedAsyncioTestCase):
     """Two owners, an isolated database, and an isolated workspace root."""
 
+    def _make_engine(self):
+        """Return the test database engine.
+
+        The default is a shared in-memory database, which is fast and keeps
+        every session on one connection. Subclasses that genuinely run work on
+        concurrent sessions (for example the background task runner) override
+        this to return a file-backed engine with independent connections.
+        """
+
+        return create_async_engine(
+            "sqlite+aiosqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
     async def asyncSetUp(self):
         # The OS automation rate limiter and emergency stop are process-local
         # by design, so reset them for deterministic, isolated tests.
         os_security.reset_state_for_tests()
 
-        self.engine = create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
+        self.engine = self._make_engine()
 
         @event.listens_for(self.engine.sync_engine, "connect")
         def _enable_foreign_keys(dbapi_connection, _record):

@@ -3,6 +3,10 @@
 from app.models.ai_cache import AIResponseCache
 from app.models.ai_usage import AIUsageRecord
 from app.models.auth import AuthSession, LoginAttempt, OwnerAccount
+from app.models.background_task import (
+    BackgroundTask,
+    BackgroundTaskStatus,
+)
 from app.models.conversation import Conversation
 from app.models.memory import Memory, MemoryStatus
 from app.models.message import Message, MessageRole
@@ -45,6 +49,8 @@ __all__ = [
     "OwnerAccount",
     "AuthSession",
     "LoginAttempt",
+    "BackgroundTask",
+    "BackgroundTaskStatus",
     "Memory",
     "MemoryStatus",
     "Conversation",

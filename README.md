@@ -871,6 +871,66 @@ TOOL_OS_EMERGENCY_RECOVERY_TOKEN=
 See [docs/os_automation_security.md](docs/os_automation_security.md) for the full
 model, operator runbook, and known single-process limitations.
 
+## Streaming responses and background tasks
+
+Phase 13 adds token streaming and durable in-process background work without
+changing the existing non-streaming chat route or the tool pipeline.
+
+- **Provider streaming:** Groq and Ollama expose a common asynchronous streaming
+  interface. The router falls back to the secondary provider only before the
+  first token; after partial output it fails safely instead of mixing answers
+  from two providers.
+- **SSE endpoint:** `POST /api/chat/stream` uses the same authentication,
+  ownership checks, `ChatService`, and LLM router as `/api/chat/`. Events are
+  `start`, `delta`, `done`, and `error`. The user message is saved before the
+  provider call, and the assistant message is saved exactly once, only after a
+  normal non-empty completion. Partial, cancelled, failed, empty, and oversized
+  answers are never stored.
+- **Client disconnect:** cancelling the request closes the provider stream and
+  skips assistant persistence. The process-local streaming slot is always
+  released, and a queued request that cannot obtain a slot within the queue
+  timeout receives `429 Too Many Requests`.
+- **Background tasks:** an asyncio runner persists owner-scoped tasks in the
+  `background_tasks` table. Only allowlisted task types (`memory_embedding` and
+  `memory_extraction`) are accepted, parameters are strictly validated, and no
+  shell command can be submitted. Concurrency is bounded, execution has a
+  timeout, and shutdown cancels incomplete work.
+- **Recovery and retention:** on startup, stale `running` rows become `failed`
+  and `queued` rows become `cancelled`; nothing is retried automatically.
+  Terminal rows are purged after the configured retention window.
+- **Ownership:** every task query and cancellation is scoped to the authenticated
+  owner. Cross-owner access is indistinguishable from a missing task (`404`), and
+  the client can never supply an owner id.
+
+Streaming uses a manual `StreamingResponse`, so no SSE framework was added.
+Streaming bypasses the semantic response cache, and tool-enabled requests emit
+the orchestrator's final answer as delta events rather than token-level tool
+output.
+
+```env
+# Streaming responses (Phase 13)
+STREAMING_ENABLED=true
+STREAM_TIMEOUT_SECONDS=120
+STREAM_IDLE_TIMEOUT_SECONDS=30
+STREAM_MAX_RESPONSE_CHARS=50000
+STREAM_MAX_CONCURRENT=4
+STREAM_QUEUE_TIMEOUT_SECONDS=5
+
+# In-process background tasks (Phase 13)
+BACKGROUND_TASKS_ENABLED=true
+BACKGROUND_TASK_MAX_CONCURRENT=2
+BACKGROUND_TASK_MAX_QUEUED_PER_USER=10
+BACKGROUND_TASK_RETENTION_DAYS=30
+BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECONDS=10
+BACKGROUND_TASK_MAX_EXECUTION_SECONDS=300
+BACKGROUND_TASK_MAX_CONVERSATION_CHARS=20000
+BACKGROUND_TASK_RECOVERY_ON_STARTUP=true
+```
+
+See
+[docs/streaming_and_background_tasks.md](docs/streaming_and_background_tasks.md)
+for the event protocol, lifecycle, limits, and known limitations.
+
 ## Authentication and local-network access
 
 ASTA has one owner account. Passwords are hashed with Argon2id, and login issues
@@ -906,6 +966,11 @@ Windows Firewall rules, the future frontend contract, and security limitations.
 | `POST` | `/api/auth/logout` | Revoke the current session |
 | `GET` | `/api/auth/me` | Return the authenticated owner and expiry |
 | `POST` | `/api/chat/` | Send a message, optionally continuing a conversation |
+| `POST` | `/api/chat/stream` | Stream one chat turn as Server-Sent Events |
+| `POST` | `/api/background-tasks/` | Queue an allowlisted background task |
+| `GET` | `/api/background-tasks/` | List the owner's background tasks |
+| `GET` | `/api/background-tasks/{id}` | Retrieve one owned background task |
+| `POST` | `/api/background-tasks/{id}/cancel` | Cancel an owned background task |
 | `POST` | `/api/conversations/` | Create a conversation |
 | `GET` | `/api/conversations/` | List the current user's conversations |
 | `GET` | `/api/conversations/{id}` | Retrieve one conversation |
@@ -1177,6 +1242,24 @@ PYTHON_SANDBOX_MAX_OUTPUT_BYTES=20000
 PYTHON_SANDBOX_ALLOW_NETWORK=false
 # Empty uses the system temporary directory for disposable workspaces.
 PYTHON_SANDBOX_WORKSPACE_PARENT=
+
+# Streaming responses (Phase 13)
+STREAMING_ENABLED=true
+STREAM_TIMEOUT_SECONDS=120
+STREAM_IDLE_TIMEOUT_SECONDS=30
+STREAM_MAX_RESPONSE_CHARS=50000
+STREAM_MAX_CONCURRENT=4
+STREAM_QUEUE_TIMEOUT_SECONDS=5
+
+# In-process background tasks (Phase 13)
+BACKGROUND_TASKS_ENABLED=true
+BACKGROUND_TASK_MAX_CONCURRENT=2
+BACKGROUND_TASK_MAX_QUEUED_PER_USER=10
+BACKGROUND_TASK_RETENTION_DAYS=30
+BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECONDS=10
+BACKGROUND_TASK_MAX_EXECUTION_SECONDS=300
+BACKGROUND_TASK_MAX_CONVERSATION_CHARS=20000
+BACKGROUND_TASK_RECOVERY_ON_STARTUP=true
 
 # Explicit frontend origins (empty for same-origin) and Host allowlist
 CORS_ALLOWED_ORIGINS=

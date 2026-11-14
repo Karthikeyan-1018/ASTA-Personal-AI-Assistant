@@ -1,5 +1,7 @@
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
 
 import httpx
 from groq import APITimeoutError, AsyncGroq, GroqError
@@ -9,6 +11,7 @@ from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
 )
+from app.llm.streaming import iterate_with_timeouts
 from app.llm.tool_calling import (
     ProviderToolTurn,
     extract_groq_tool_calls,
@@ -148,6 +151,113 @@ class GroqProvider:
 
             logger.exception(
                 "Unexpected Groq provider error."
+            )
+
+            raise LLMProviderError(
+                "Groq provider failed unexpectedly."
+            ) from error
+
+    async def stream_response(
+        self,
+        prompt: str,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield Groq answer text as it is generated.
+
+        Errors are mapped to the same structured exceptions used by the
+        non-streaming path. The SDK stream is closed on every exit path,
+        including caller cancellation. Only answer text is yielded; reasoning
+        fields, tool calls, and provider metadata are ignored here.
+        """
+
+        self.last_usage = None
+        target_model = model or self.model
+        stream = None
+
+        try:
+
+            stream = await self.client.chat.completions.create(
+                model=target_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                stream=True,
+            )
+
+            async for chunk in iterate_with_timeouts(
+                stream,
+                idle_timeout=settings.STREAM_IDLE_TIMEOUT_SECONDS,
+                overall_timeout=settings.STREAM_TIMEOUT_SECONDS,
+            ):
+
+                usage = _extract_usage(chunk)
+
+                if usage is not None:
+                    self.last_usage = usage
+
+                choices = getattr(chunk, "choices", None)
+
+                if not choices:
+                    continue
+
+                delta = getattr(choices[0], "delta", None)
+                content = (
+                    getattr(delta, "content", None)
+                    if delta is not None
+                    else None
+                )
+
+                if content:
+                    yield content
+
+        except asyncio.CancelledError:
+            raise
+
+        except (APITimeoutError, httpx.TimeoutException, asyncio.TimeoutError) as error:
+
+            logger.warning(
+                "Groq streaming request timed out after %s seconds.",
+                settings.STREAM_TIMEOUT_SECONDS,
+            )
+
+            raise LLMTimeoutError(
+                "Groq request timed out."
+            ) from error
+
+        except GroqError as error:
+
+            logger.error(
+                "Groq streaming error (%s), status code: %s",
+                type(error).__name__,
+                getattr(error, "status_code", "unknown"),
+            )
+
+            raise LLMProviderError(
+                "Groq provider request failed."
+            ) from error
+
+        except httpx.HTTPError as error:
+
+            logger.error(
+                "Groq HTTP error during streaming: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Groq provider connection failed."
+            ) from error
+
+        except (LLMTimeoutError, LLMProviderError):
+            raise
+
+        except Exception as error:
+
+            logger.error(
+                "Unexpected Groq streaming error (%s).",
+                type(error).__name__,
             )
 
             raise LLMProviderError(

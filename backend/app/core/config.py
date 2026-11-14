@@ -1045,6 +1045,86 @@ class Settings:
         "",
     ).strip()
 
+    # ------------------------------------------------------------------
+    # Phase 13 streaming responses
+    # ------------------------------------------------------------------
+
+    # Streaming is additive: the historical non-streaming chat route is never
+    # affected by these values.
+    STREAMING_ENABLED: bool = (
+        os.getenv("STREAMING_ENABLED", "true").lower() == "true"
+    )
+
+    # Overall wall-clock limit for one streamed response.
+    STREAM_TIMEOUT_SECONDS: float = float(
+        os.getenv("STREAM_TIMEOUT_SECONDS", "120")
+    )
+
+    # Maximum time to wait for the next token before treating the provider as
+    # stalled. This protects against a connection that stays open silently.
+    STREAM_IDLE_TIMEOUT_SECONDS: float = float(
+        os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "30")
+    )
+
+    # Bounded accumulation protects memory and prevents an unbounded provider
+    # response from being persisted. A response over this limit is treated as
+    # a failure and is never stored as a complete assistant answer.
+    STREAM_MAX_RESPONSE_CHARS: int = int(
+        os.getenv("STREAM_MAX_RESPONSE_CHARS", "50000")
+    )
+
+    # Process-local concurrency guard for the streaming endpoint. This is
+    # intentionally in-process; ASTA normally runs a single application
+    # process. Requests that cannot obtain a slot within the queue timeout are
+    # rejected with HTTP 429.
+    STREAM_MAX_CONCURRENT: int = int(
+        os.getenv("STREAM_MAX_CONCURRENT", "4")
+    )
+
+    STREAM_QUEUE_TIMEOUT_SECONDS: float = float(
+        os.getenv("STREAM_QUEUE_TIMEOUT_SECONDS", "5")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 13 in-process background tasks
+    # ------------------------------------------------------------------
+
+    BACKGROUND_TASKS_ENABLED: bool = (
+        os.getenv("BACKGROUND_TASKS_ENABLED", "true").lower() == "true"
+    )
+
+    BACKGROUND_TASK_MAX_CONCURRENT: int = int(
+        os.getenv("BACKGROUND_TASK_MAX_CONCURRENT", "2")
+    )
+
+    BACKGROUND_TASK_MAX_QUEUED_PER_USER: int = int(
+        os.getenv("BACKGROUND_TASK_MAX_QUEUED_PER_USER", "10")
+    )
+
+    BACKGROUND_TASK_RETENTION_DAYS: int = int(
+        os.getenv("BACKGROUND_TASK_RETENTION_DAYS", "30")
+    )
+
+    BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECONDS: float = float(
+        os.getenv("BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECONDS", "10")
+    )
+
+    BACKGROUND_TASK_MAX_EXECUTION_SECONDS: float = float(
+        os.getenv("BACKGROUND_TASK_MAX_EXECUTION_SECONDS", "300")
+    )
+
+    # Bound the conversation text handed to the extraction handler.
+    BACKGROUND_TASK_MAX_CONVERSATION_CHARS: int = int(
+        os.getenv("BACKGROUND_TASK_MAX_CONVERSATION_CHARS", "20000")
+    )
+
+    # On startup, stale running rows become failed and queued rows become
+    # cancelled. No non-idempotent work is retried automatically.
+    BACKGROUND_TASK_RECOVERY_ON_STARTUP: bool = (
+        os.getenv("BACKGROUND_TASK_RECOVERY_ON_STARTUP", "true").lower()
+        == "true"
+    )
+
     @property
     def tool_workspace_roots(self) -> list[str]:
         return [

@@ -1,6 +1,7 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 
 import httpx
 import ollama
@@ -10,6 +11,7 @@ from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
 )
+from app.llm.streaming import iterate_with_timeouts
 from app.llm.tool_calling import (
     ProviderToolTurn,
     extract_ollama_tool_calls,
@@ -153,6 +155,113 @@ class OllamaProvider:
 
             logger.exception(
                 "Unexpected Ollama provider error."
+            )
+
+            raise LLMProviderError(
+                "Ollama provider failed unexpectedly."
+            ) from error
+
+    async def stream_response(
+        self,
+        prompt: str,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield Ollama answer text as it is generated.
+
+        Ollama reports prompt and completion counts on the final chunk; those
+        counts are captured in ``last_usage``. The stream is closed on every
+        exit path, including caller cancellation. No prompt or response text is
+        written to logs.
+        """
+
+        self.last_usage = None
+        target_model = model or self.model
+        stream = None
+
+        try:
+
+            stream = await asyncio.wait_for(
+                self.client.chat(
+                    model=target_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    options={
+                        "num_ctx": settings.OLLAMA_NUM_CTX
+                    },
+                    stream=True,
+                ),
+                timeout=settings.OLLAMA_TIMEOUT_SECONDS
+            )
+
+            async for part in iterate_with_timeouts(
+                stream,
+                idle_timeout=settings.STREAM_IDLE_TIMEOUT_SECONDS,
+                overall_timeout=settings.STREAM_TIMEOUT_SECONDS,
+            ):
+
+                usage = _extract_usage(part)
+
+                if usage is not None:
+                    self.last_usage = usage
+
+                message = _field(part, "message")
+                content = (
+                    _field(message, "content")
+                    if message is not None
+                    else None
+                )
+
+                if content:
+                    yield content
+
+        except asyncio.CancelledError:
+            raise
+
+        except (asyncio.TimeoutError, httpx.TimeoutException) as error:
+
+            logger.warning(
+                "Ollama streaming request timed out after %s seconds.",
+                settings.STREAM_TIMEOUT_SECONDS,
+            )
+
+            raise LLMTimeoutError(
+                "Ollama request timed out."
+            ) from error
+
+        except (ollama.ResponseError, ollama.RequestError) as error:
+
+            logger.error(
+                "Ollama streaming error: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Ollama provider request failed."
+            ) from error
+
+        except (ConnectionError, httpx.HTTPError) as error:
+
+            logger.error(
+                "Ollama connection error during streaming: %s",
+                type(error).__name__,
+            )
+
+            raise LLMProviderError(
+                "Ollama provider connection failed."
+            ) from error
+
+        except (LLMTimeoutError, LLMProviderError):
+            raise
+
+        except Exception as error:
+
+            logger.error(
+                "Unexpected Ollama streaming error (%s).",
+                type(error).__name__,
             )
 
             raise LLMProviderError(

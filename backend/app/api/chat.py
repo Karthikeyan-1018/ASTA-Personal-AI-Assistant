@@ -1,12 +1,16 @@
 
+import asyncio
+import json
 import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user_id, require_csrf
+from app.core.config import settings
 from app.database.connection import get_db
 from app.exceptions.conversation_exceptions import (
     ConversationNotFoundError,
@@ -41,6 +45,43 @@ router = APIRouter(
     tags=["Chat"],
     dependencies=[Depends(require_csrf)]
 )
+
+
+# Process-local concurrency guard for the streaming endpoint. The semaphore is
+# created lazily so it binds to the running event loop, which keeps the module
+# importable outside an application loop (for example by Alembic or tooling).
+_stream_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_stream_semaphore() -> asyncio.Semaphore:
+    global _stream_semaphore
+
+    if _stream_semaphore is None:
+        _stream_semaphore = asyncio.Semaphore(
+            max(1, int(settings.STREAM_MAX_CONCURRENT or 1))
+        )
+
+    return _stream_semaphore
+
+
+def _reset_stream_semaphore() -> None:
+    """Reset process-local streaming state. Used by isolated tests."""
+
+    global _stream_semaphore
+    _stream_semaphore = None
+
+
+def _sse_frame(event: str, data: dict) -> str:
+    """Render one Server-Sent Events frame.
+
+    The payload is JSON on a single ``data:`` line so a client can parse each
+    event independently. Values are coerced with ``default=str`` to keep the
+    protocol robust if a provider adds a non-primitive metadata value.
+    """
+
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+
+    return f"event: {event}\ndata: {payload}\n\n"
 
 
 class ChatRequest(BaseModel):
@@ -353,6 +394,125 @@ async def chat(
                 "your request."
             )
         ) from error
+
+
+@router.post("/stream")
+async def chat_stream(
+    request: ChatRequest,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Stream one chat turn using Server-Sent Events.
+
+    The request is authenticated and owner-scoped before any bytes are sent.
+    A client that disconnects stops the provider stream; a partial assistant
+    answer is never persisted. Event names are ``start``, ``delta``, ``done``,
+    and ``error``.
+    """
+
+    if not settings.STREAMING_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Streaming is currently disabled.",
+        )
+
+    if not request.message or not request.message.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prompt cannot be empty",
+        )
+
+    # Validate conversation ownership before the response begins so the client
+    # receives a normal HTTP error rather than an in-band SSE error event.
+    await _get_owned_conversation(
+        session=session,
+        user_id=user_id,
+        conversation_id=request.conversation_id,
+    )
+
+    semaphore = _get_stream_semaphore()
+    queue_timeout = float(settings.STREAM_QUEUE_TIMEOUT_SECONDS or 0)
+
+    try:
+        if queue_timeout > 0:
+            await asyncio.wait_for(
+                semaphore.acquire(),
+                timeout=queue_timeout,
+            )
+        else:
+            await semaphore.acquire()
+
+    except asyncio.TimeoutError as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Too many concurrent streaming requests. "
+                "Please try again shortly."
+            ),
+            headers={"Retry-After": "5"},
+        ) from error
+
+    async def event_source():
+
+        try:
+            async for event in chat_service.stream_response(
+                prompt=request.message,
+                private=request.private,
+                user_id=user_id,
+                session=session,
+                conversation_id=request.conversation_id,
+            ):
+                yield _sse_frame(
+                    event.get("event") or "message",
+                    event.get("data") or {},
+                )
+
+        except asyncio.CancelledError:
+            # The client disconnected. The chat service's generator closes the
+            # provider stream and deliberately skips assistant persistence.
+            logger.info(
+                "Streaming chat request was cancelled by the client."
+            )
+            raise
+
+        except ConversationNotFoundError:
+            yield _sse_frame(
+                "error",
+                {
+                    "code": "conversation_not_found",
+                    "message": "Conversation not found.",
+                },
+            )
+
+        except Exception as error:
+            logger.error(
+                "Unexpected error while serving a streaming chat request "
+                "(%s).",
+                type(error).__name__,
+            )
+            yield _sse_frame(
+                "error",
+                {
+                    "code": "internal_error",
+                    "message": (
+                        "An unexpected error occurred while processing "
+                        "your request."
+                    ),
+                },
+            )
+
+        finally:
+            semaphore.release()
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post(

@@ -10,11 +10,14 @@ Private requests are always resolved to Ollama only. Their execution path
 never consults a cloud provider, not even for a health check.
 """
 
+import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 
 from app.ai.routing_policy import select_route
 from app.ai.tokenization import safe_estimate_tokens
+from app.core.config import settings
 from app.exceptions.llm_exceptions import (
     LLMProviderError,
     LLMTimeoutError,
@@ -360,6 +363,261 @@ class LLMRouter:
             "Both Groq and Ollama providers are unavailable."
         )
 
+
+    async def stream_response(
+        self,
+        prompt: str,
+        private: bool = False,
+        complexity=None,
+        policy: str | None = None,
+        request_type: str | None = None,
+        metadata: dict | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream a response using the existing provider routing rules.
+
+        ``metadata`` is an optional caller-owned mapping. It is populated with
+        the same safe routing facts returned by ``generate_response``: the
+        selected provider and model, policy, complexity, fallback flag, usage
+        counts, and duration. It never contains prompt or response text.
+
+        Fallback is only attempted before the first token of a provider. Once
+        a provider has emitted text, a mid-stream failure is surfaced as
+        ``LLMUnavailableError`` instead of silently concatenating output from a
+        second provider. Private requests remain Ollama-only.
+        """
+
+        started = time.perf_counter()
+
+        decision = select_route(
+            private=private,
+            complexity=complexity,
+            policy=policy,
+        )
+
+        meta = metadata if metadata is not None else {}
+        meta.clear()
+        meta.update({
+            "routing_policy": decision.policy,
+            "complexity": getattr(
+                decision.complexity,
+                "value",
+                decision.complexity,
+            ),
+            "provider_order": list(decision.provider_order),
+            "request_type": request_type,
+            "provider": None,
+            "model": None,
+            "fallback_used": False,
+            "usage": None,
+            "duration_ms": None,
+        })
+
+        response_limit = max(
+            0,
+            int(settings.STREAM_MAX_RESPONSE_CHARS or 0),
+        )
+
+        if private:
+
+            logger.info("Routing private streaming request to Ollama only.")
+
+            if not await ollama_provider.health_check():
+
+                logger.error(
+                    "Ollama is unavailable for a private streaming request."
+                )
+
+                raise LLMUnavailableError(
+                    "Local AI provider is unavailable. "
+                    "Private request was not sent to the cloud."
+                )
+
+            model = decision.primary_model
+            meta.update({"provider": "ollama", "model": model})
+
+            emitted = False
+            collected: list[str] = []
+            collected_chars = 0
+
+            try:
+
+                try:
+                    ollama_provider.last_usage = None
+                except Exception:
+                    pass
+
+                async for chunk in ollama_provider.stream_response(
+                    prompt,
+                    model=model,
+                ):
+
+                    emitted = True
+
+                    if collected_chars < response_limit:
+                        take = chunk[: response_limit - collected_chars]
+                        collected.append(take)
+                        collected_chars += len(take)
+
+                    yield chunk
+
+            except asyncio.CancelledError:
+                raise
+
+            except LLMTimeoutError:
+
+                logger.error(
+                    "Ollama timed out while streaming a private request.",
+                    exc_info=True,
+                )
+
+                raise
+
+            except LLMProviderError as error:
+
+                logger.error(
+                    "Ollama failed while streaming a private request.",
+                    exc_info=True,
+                )
+
+                raise LLMUnavailableError(
+                    "Local AI provider failed. "
+                    "Private request was not sent to the cloud."
+                ) from error
+
+            except Exception as error:
+
+                logger.exception(
+                    "Unexpected Ollama failure while streaming a private "
+                    "request."
+                )
+
+                raise LLMUnavailableError(
+                    "Local AI provider failed. "
+                    "Private request was not sent to the cloud."
+                ) from error
+
+            if not emitted:
+                raise LLMUnavailableError(
+                    "Local AI provider returned an empty response. "
+                    "Private request was not sent to the cloud."
+                )
+
+            meta["duration_ms"] = round(
+                max(0.0, (time.perf_counter() - started) * 1000.0),
+                2,
+            )
+            meta["usage"] = _usage_metadata(
+                ollama_provider,
+                prompt,
+                "".join(collected),
+            )
+
+            return
+
+        attempted_provider = False
+
+        for index, provider_name in enumerate(decision.provider_order):
+
+            provider = _provider(provider_name)
+            is_last = index == len(decision.provider_order) - 1
+            fallback_used = provider_name == decision.fallback
+            model = decision.model_for(provider_name)
+
+            if not await provider.health_check():
+
+                logger.warning(
+                    "%s provider is unavailable for streaming.",
+                    provider_name.capitalize(),
+                )
+
+                continue
+
+            attempted_provider = True
+            emitted = False
+            collected = []
+            collected_chars = 0
+
+            try:
+
+                try:
+                    provider.last_usage = None
+                except Exception:
+                    pass
+
+                async for chunk in provider.stream_response(
+                    prompt,
+                    model=model,
+                ):
+
+                    if not emitted:
+                        emitted = True
+                        meta.update({
+                            "provider": provider_name,
+                            "model": model,
+                            "fallback_used": fallback_used,
+                        })
+
+                    if collected_chars < response_limit:
+                        take = chunk[: response_limit - collected_chars]
+                        collected.append(take)
+                        collected_chars += len(take)
+
+                    yield chunk
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as error:
+
+                if emitted:
+
+                    logger.warning(
+                        "%s failed after streaming began; fallback is not "
+                        "safe.",
+                        provider_name.capitalize(),
+                        exc_info=True,
+                    )
+
+                    raise LLMUnavailableError(
+                        "The AI provider failed while streaming the response."
+                    ) from error
+
+                logger.warning(
+                    "%s failed before streaming began.",
+                    provider_name.capitalize(),
+                    exc_info=True,
+                )
+
+            if emitted:
+
+                meta["duration_ms"] = round(
+                    max(0.0, (time.perf_counter() - started) * 1000.0),
+                    2,
+                )
+                meta["usage"] = _usage_metadata(
+                    provider,
+                    prompt,
+                    "".join(collected),
+                )
+
+                return
+
+            logger.warning(
+                "%s returned an empty stream.",
+                provider_name.capitalize(),
+            )
+
+            if is_last:
+                break
+
+        if attempted_provider:
+            raise LLMUnavailableError(
+                "Both Groq and Ollama providers failed to generate a response."
+            )
+
+        raise LLMUnavailableError(
+            "Both Groq and Ollama providers are unavailable."
+        )
 
     async def generate_with_tools(
         self,
