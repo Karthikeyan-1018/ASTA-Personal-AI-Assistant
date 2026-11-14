@@ -835,6 +835,128 @@ class Settings:
         os.getenv("TOOL_FILE_MAX_SEARCH_RESULTS", "100")
     )
 
+    # Read-only system information tools. Disabled by default. Only scalar
+    # hardware and runtime facts are collected; files, environment variables,
+    # process lists, and user data are never read. Disk usage is limited to an
+    # explicit allowlist of local roots, or the system drive when no allowlist
+    # is configured. Volumes are never enumerated.
+    TOOL_SYSTEM_INFO_ENABLED: bool = (
+        os.getenv("TOOL_SYSTEM_INFO_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_SYSTEM_INFO_DISK_ROOTS: str = os.getenv(
+        "TOOL_SYSTEM_INFO_DISK_ROOTS",
+        ""
+    ).strip()
+
+    TOOL_SYSTEM_INFO_MAX_DISKS: int = int(
+        os.getenv("TOOL_SYSTEM_INFO_MAX_DISKS", "8")
+    )
+
+    # Read-only process and active-window inspection (Phase 12D). Disabled by
+    # default. Only bounded process identity and resource measurements are
+    # collected; command lines, environment variables, memory contents,
+    # executable paths, and owners are never read or returned.
+    TOOL_PROCESS_INSPECTION_ENABLED: bool = (
+        os.getenv("TOOL_PROCESS_INSPECTION_ENABLED", "false").lower()
+        == "true"
+    )
+
+    TOOL_PROCESS_MAX_RESULTS: int = int(
+        os.getenv("TOOL_PROCESS_MAX_RESULTS", "25")
+    )
+
+    TOOL_PROCESS_MAX_MATCHES: int = int(
+        os.getenv("TOOL_PROCESS_MAX_MATCHES", "20")
+    )
+
+    TOOL_PROCESS_MAX_NAME_CHARS: int = int(
+        os.getenv("TOOL_PROCESS_MAX_NAME_CHARS", "128")
+    )
+
+    TOOL_PROCESS_MAX_TITLE_CHARS: int = int(
+        os.getenv("TOOL_PROCESS_MAX_TITLE_CHARS", "300")
+    )
+
+    TOOL_PROCESS_CPU_SAMPLE_MS: int = int(
+        os.getenv("TOOL_PROCESS_CPU_SAMPLE_MS", "100")
+    )
+
+    # Secure clipboard, keyboard, and mouse interaction (Phase 12E). Each
+    # capability is disabled by default and separately configurable. Clipboard
+    # reads and writes and every state-changing desktop action require explicit
+    # confirmation. Only plain clipboard text and an allowlisted set of single
+    # key presses are supported.
+    TOOL_CLIPBOARD_ENABLED: bool = (
+        os.getenv("TOOL_CLIPBOARD_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_CLIPBOARD_MAX_READ_CHARS: int = int(
+        os.getenv("TOOL_CLIPBOARD_MAX_READ_CHARS", "4000")
+    )
+
+    TOOL_CLIPBOARD_MAX_WRITE_CHARS: int = int(
+        os.getenv("TOOL_CLIPBOARD_MAX_WRITE_CHARS", "4000")
+    )
+
+    TOOL_KEYBOARD_ENABLED: bool = (
+        os.getenv("TOOL_KEYBOARD_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_MOUSE_ENABLED: bool = (
+        os.getenv("TOOL_MOUSE_ENABLED", "false").lower() == "true"
+    )
+
+    # Phase 12F central OS automation controls. The master switch is an
+    # additional, deployment-wide gate: when it is false every built-in OS
+    # automation tool is denied even if its per-capability flag is true. The
+    # model can never change these values. The emergency stop is a separate
+    # authenticated-owner control, not a registered tool. Rate limits are
+    # enforced server-side and are owner-isolated. The limiter is process-local
+    # and adds no database migration; see docs/os_automation_security.md.
+    TOOL_OS_AUTOMATION_ENABLED: bool = (
+        os.getenv("TOOL_OS_AUTOMATION_ENABLED", "false").lower() == "true"
+    )
+
+    TOOL_OS_RATE_LIMIT_ENABLED: bool = (
+        os.getenv("TOOL_OS_RATE_LIMIT_ENABLED", "true").lower() == "true"
+    )
+
+    TOOL_OS_MAX_CALLS_PER_MINUTE: int = int(
+        os.getenv("TOOL_OS_MAX_CALLS_PER_MINUTE", "30")
+    )
+
+    TOOL_OS_MAX_STATE_CHANGES_PER_MINUTE: int = int(
+        os.getenv("TOOL_OS_MAX_STATE_CHANGES_PER_MINUTE", "10")
+    )
+
+    TOOL_OS_MAX_CALLS_PER_HOUR: int = int(
+        os.getenv("TOOL_OS_MAX_CALLS_PER_HOUR", "300")
+    )
+
+    # Trusted recovery secret for the emergency stop. It is never returned to
+    # the model or written to logs. When it is empty, recovery is disabled and
+    # only a process restart clears an engaged stop.
+    TOOL_OS_EMERGENCY_RECOVERY_TOKEN: str = os.getenv(
+        "TOOL_OS_EMERGENCY_RECOVERY_TOKEN",
+        "",
+    )
+
+    # Secure application launching (Phase 12B). Disabled by default. The model
+    # supplies only an alias; the executable path always comes from this
+    # server-side allowlist. Launching is a sensitive action and additionally
+    # requires TOOL_ALLOW_SENSITIVE plus per-call confirmation.
+    TOOL_APPLICATION_LAUNCH_ENABLED: bool = (
+        os.getenv("TOOL_APPLICATION_LAUNCH_ENABLED", "false").lower() == "true"
+    )
+
+    # Comma- or newline-separated ``alias=absolute-path`` entries. Example:
+    # vscode=C:\Program Files\Microsoft VS Code\Code.exe
+    TOOL_APPLICATION_ALLOWLIST: str = os.getenv(
+        "TOOL_APPLICATION_ALLOWLIST",
+        ""
+    ).strip()
+
     # Allowlisted HTTP integration framework. Arbitrary LLM-generated URLs are
     # never accepted, and redirects are not followed.
     TOOL_HTTP_ENABLED: bool = (
@@ -930,6 +1052,44 @@ class Settings:
             for root in self.TOOL_WORKSPACE_ROOTS.split(",")
             if root.strip()
         ]
+
+    @property
+    def tool_system_info_disk_roots(self) -> list[str]:
+        return [
+            root.strip()
+            for root in self.TOOL_SYSTEM_INFO_DISK_ROOTS.split(",")
+            if root.strip()
+        ]
+
+    @property
+    def tool_application_allowlist(self) -> dict[str, str]:
+        """Parse ``alias=path`` entries without validating the filesystem.
+
+        The launcher performs the authoritative normalization and path
+        validation. This property only splits the configured value, keeps the
+        first occurrence of an exact alias, and never raises for malformed
+        input.
+        """
+
+        entries: dict[str, str] = {}
+
+        for item in (self.TOOL_APPLICATION_ALLOWLIST or "").replace(
+            "\n",
+            ",",
+        ).split(","):
+            entry = item.strip()
+
+            if not entry or "=" not in entry:
+                continue
+
+            alias, path = entry.split("=", 1)
+            alias = alias.strip()
+            path = path.strip()
+
+            if alias and path:
+                entries.setdefault(alias, path)
+
+        return entries
 
     @property
     def tool_http_allowed_hosts(self) -> set[str]:

@@ -46,6 +46,7 @@ from app.tools.enums import (
     ToolExecutionLifecycle,
     ToolExecutionStatus,
 )
+from app.tools import os_audit, os_security
 from app.tools.lifecycle import lifecycle_from_status
 from app.tools.retry import (
     backoff_seconds,
@@ -645,6 +646,39 @@ class ToolExecutor:
             status=ToolExecutionStatus.RUNNING,
         )
 
+        # Phase 12F: re-check the central OS policy and consume an
+        # owner-isolated rate-limit slot immediately before execution. A
+        # confirmation approval never bypasses this check.
+        if os_security.is_os_tool(tool):
+            try:
+                os_security.authorize_execution(tool, user_id=user_id)
+
+            except ToolError as error:
+                if claimed is not None:
+                    await self._mark_failed(
+                        session=session,
+                        user_id=user_id,
+                        confirmation_id=claimed.id,
+                    )
+
+                return await self._reject(
+                    context=context,
+                    tool=tool,
+                    error=error,
+                    started=started,
+                    category=(
+                        ToolErrorCategory.DISABLED
+                        if isinstance(error, ToolDisabledError)
+                        else ToolErrorCategory.PERMISSION
+                    ),
+                    status=ToolExecutionStatus.DENIED,
+                    confirmation_state=(
+                        ConfirmationState.CONFIRMED
+                        if claimed is not None
+                        else ConfirmationState.NOT_REQUIRED
+                    ),
+                )
+
         try:
             result = await self._run(
                 context=context,
@@ -872,6 +906,12 @@ class ToolExecutor:
         timeout = _execution_timeout()
 
         try:
+            # Phase 12F: check the emergency stop again immediately before the
+            # tool runs, closing the window between the earlier policy check
+            # and the side effect.
+            if os_security.is_os_tool(tool):
+                os_security.ensure_not_stopped()
+
             result = await asyncio.wait_for(
                 tool.execute(context, validated),
                 timeout=timeout,
@@ -1274,6 +1314,42 @@ class ToolExecutor:
             _value(confirmation_state),
             result.error_code,
         )
+
+        capability = os_security.capability_of(tool)
+
+        if capability is not None:
+            try:
+                os_audit.log_execution(
+                    user_id=getattr(context, "user_id", None),
+                    conversation_id=getattr(context, "conversation_id", None),
+                    tool_name=tool.name,
+                    category=tool.category,
+                    capability=capability,
+                    status=result.status,
+                    lifecycle=lifecycle,
+                    confirmation=confirmation_state,
+                    duration_ms=result.duration_ms,
+                    retry_count=result.retry_count,
+                    error_category=result.error_category,
+                    error_code=result.error_code,
+                    rate_limit_outcome=os_audit.classify_rate_limit(
+                        result,
+                        enabled=bool(
+                            getattr(
+                                settings,
+                                "TOOL_OS_RATE_LIMIT_ENABLED",
+                                True,
+                            )
+                        ),
+                    ),
+                )
+
+            except Exception:
+                # Audit logging is never an authorization precondition.
+                logger.debug(
+                    "Failed to write an OS automation audit event.",
+                    exc_info=True,
+                )
 
         return record
 

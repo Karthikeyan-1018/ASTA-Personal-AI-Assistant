@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_current_user_id, require_csrf
 from app.database.connection import get_db
 from app.schemas.tool import (
+    EmergencyStopResponse,
     ToolConfirmationActionResponse,
     ToolConfirmationListResponse,
     ToolConfirmationResponse,
@@ -46,6 +47,7 @@ from app.tools.exceptions import (
     ToolConfirmationResolvedError,
 )
 from app.tools.executor import tool_executor
+from app.tools import os_audit, os_security
 from app.tools.registry import tool_registry
 
 
@@ -383,6 +385,12 @@ async def confirm_tool_action(
             detail="That tool confirmation has already been resolved.",
         )
 
+    if result.error_code == "ToolEmergencyStopError":
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="OS automation is blocked by the emergency stop.",
+        )
+
     try:
         fresh = await tool_confirmation_service.get(
             session=session,
@@ -451,6 +459,102 @@ async def reject_tool_action(
         confirmation=_confirmation_response(fresh),
         result=None,
     )
+
+
+def _emergency_stop_response(state) -> EmergencyStopResponse:
+    return EmergencyStopResponse(
+        engaged=state.engaged,
+        engaged_at=state.engaged_at,
+        engaged_by_user_id=state.engaged_by_user_id,
+        recovery_configured=state.recovery_configured,
+    )
+
+
+@router.get("/emergency-stop", response_model=EmergencyStopResponse)
+async def emergency_stop_status(
+    user_id: int = Depends(get_current_user_id),
+):
+    """Return the current OS automation emergency-stop state.
+
+    This endpoint never exposes the recovery token or any secret.
+    """
+
+    return _emergency_stop_response(os_security.emergency_stop_state())
+
+
+@router.post("/emergency-stop", response_model=EmergencyStopResponse)
+async def engage_emergency_stop(
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Engage the OS automation emergency stop.
+
+    This is a trusted control endpoint, not a registered LLM tool. It only
+    flips a process-local flag and invalidates pending confirmations. It never
+    kills a process, touches ASTA or PostgreSQL, deletes a file, or changes a
+    setting.
+    """
+
+    state = os_security.engage_emergency_stop(user_id=user_id)
+
+    try:
+        rejected = await tool_confirmation_service.reject_all_pending(
+            session=session
+        )
+
+        if rejected:
+            logger.warning(
+                "Emergency stop invalidated %s pending tool confirmation(s).",
+                rejected,
+            )
+
+    except Exception:
+        # The in-memory stop still blocks execution even if the database
+        # update fails. Pending confirmations are also re-checked by the
+        # executor before they can run.
+        logger.exception(
+            "Failed to invalidate pending confirmations after the emergency "
+            "stop."
+        )
+
+    os_audit.log_emergency_stop(
+        action="engaged",
+        user_id=user_id,
+        engaged_at=state.engaged_at,
+        engaged_by_user_id=state.engaged_by_user_id,
+    )
+
+    return _emergency_stop_response(state)
+
+
+@router.post("/emergency-stop/recover", response_model=EmergencyStopResponse)
+async def recover_emergency_stop(
+    recovery_token: str | None = Header(
+        default=None,
+        alias="X-Emergency-Recovery-Token",
+    ),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Clear the emergency stop with the trusted server-side token.
+
+    Authentication alone is never sufficient. A missing configured token, a
+    missing header, or a mismatch fails closed.
+    """
+
+    if not os_security.recover_emergency_stop(
+        user_id=user_id,
+        token=recovery_token,
+    ):
+        os_audit.log_emergency_stop(
+            action="recovery_denied",
+            user_id=user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Emergency stop recovery is not authorized.",
+        )
+
+    return _emergency_stop_response(os_security.emergency_stop_state())
 
 
 __all__ = ["router"]

@@ -35,6 +35,10 @@ long-term memory.
 - Resource-limited Python execution inside a real Windows AppContainer and Job Object boundary, with a disposable workspace, a scrubbed environment, blocked subprocesses, denied network access, bounded output, and confirmed, disabled-by-default tool integration (Phase 11G).
 - End-to-end tool calling in the real chat pipeline, with bounded multi-round execution, owner- and argument-bound confirmation approvals, metadata-only transcript persistence, safe provider-failure recovery, and unchanged text-only behaviour when disabled (Phase 11H).
 - Tool execution history and reliability with a validated lifecycle, start/completion timestamps, retry and truncation metadata, owner-scoped status/summary APIs, opt-in bounded retries for idempotent read-only tools, idempotency-key duplicate prevention, restart recovery, and structured logs/metrics (Phase 11I).
+- Read-only system information tools for OS, hostname, CPU, memory, approved local disk usage, Python runtime, and a consolidated summary, using only Python standard-library APIs (Phase 12A).
+- Secure, allowlisted desktop-application launching by alias, with server-side executable paths, confirmation-gated sensitive execution, private-mode denial, and no shell or arbitrary argument execution (Phase 12B).
+- Read-only process and active-window inspection with bounded process listings, least-privilege CPU and memory measurements, protected-process filtering, allowlist-backed application status, and no process or window modification (Phase 12D).
+- Tightly restricted, confirmation-gated clipboard, keyboard, and mouse interaction with plain-text-only bounded clipboard access, a fixed single-key allowlist, validated pointer coordinates, and one left click per confirmed action (Phase 12E).
 - Timezone-aware deadline views (overdue, today, tomorrow, upcoming).
 - Unified context assembly from preferences, memories, tasks, deadlines, and bounded history.
 - Per-user ownership checks on every conversation, message, preference, task, usage, and AI cache query.
@@ -392,10 +396,11 @@ limitations.
 
 ## Filesystem tools
 
-Phase 11F adds six built-in filesystem tools. They are disabled by default and
-only operate inside explicitly configured workspace roots. The tools never
-delete files, mutate a directory tree recursively, execute a file, or run a
-shell command.
+Phase 11F introduced six built-in filesystem tools. Phase 12C adds existence
+checks plus approved-root folder creation, rename, and move. They are disabled
+by default and only operate inside explicitly configured workspace roots. The
+tools never delete files, mutate a directory tree recursively, execute a file,
+or run a shell command.
 
 | Tool | Category | Confirmation | Purpose |
 | --- | --- | --- | --- |
@@ -403,8 +408,14 @@ shell command.
 | `fs_search` | read-only | no | Find files by a name glob below one directory. |
 | `fs_read` | read-only | no | Read a bounded UTF-8 text file. |
 | `fs_metadata` | read-only | no | Return type, size, modified time, and suffix. |
+| `fs_exists` | read-only | no | Report whether a path exists and what type it is. |
 | `fs_create` | reversible | yes | Create a text file, optionally replacing an existing one. |
 | `fs_update` | reversible | yes | Replace the contents of an existing text file. |
+| `fs_mkdir` | reversible | yes | Create one new folder; the parent must exist. |
+| `fs_rename` | reversible | yes | Rename an entry in place; never overwrites. |
+| `fs_move` | reversible | yes | Move an entry to a new path; never overwrites. |
+
+There is no delete tool. Permanent deletion is intentionally deferred.
 
 Every call goes through `ToolExecutor` and the central permission policy. The
 filesystem tools are denied in private mode. A relative path resolves against
@@ -414,27 +425,35 @@ inside one of the configured roots.
 Security is fail-closed:
 
 - paths are resolved (following symlinks and junctions) and must remain inside
-  an approved root; `..` traversal, absolute escapes, and link escapes are
-  rejected;
+  an approved root; `..` traversal, absolute escapes, UNC/network paths,
+  Windows device namespaces, and link escapes are rejected;
 - drive roots and Windows system directories cannot be configured as roots,
-  nor can a root contain or live inside one;
+  nor can a root contain or live inside one; the user profile and its ancestors
+  are rejected, as are roots inside or containing a browser profile or
+  credential store;
 - `.env` files, credentials, secrets, private keys, key stores, Terraform
-  state, sensitive directories such as `.ssh`/`.aws`/`.git`, and common
-  credential files are denied and omitted from listings and search;
+  state, browser credential files, sensitive directories such as
+  `.ssh`/`.aws`/`.git`/`agriculture_db`, and common credential files are denied
+  and omitted from listings and search;
 - Windows alternate data streams, reserved device names, trailing dots or
   spaces, drive-relative paths, and rooted paths without a drive letter are
   rejected;
 - reads are bounded, must decode as UTF-8, and reject NUL bytes, control-heavy
   binary content, and known binary formats; writes are bounded and text-only;
-- creates and updates always require explicit confirmation bound to the exact
-  owner, conversation, tool, and arguments;
+- creates, updates, folder creation, rename, and move always require explicit
+  confirmation bound to the exact owner, conversation, tool, and arguments;
+  approvals are single-use, expiring, and revalidated immediately before
+  execution;
 - non-overwriting creates use exclusive creation, while updates and overwrites
   write a same-directory temporary file and atomically replace the destination;
   a failed write leaves the original unchanged;
+- rename and move never overwrite an existing destination, refuse
+  links/junctions/reparse points, reject a workspace root, and refuse a folder
+  moved into itself or a descendant; cross-volume moves fail closed;
 - read content is marked `untrusted` and is never written to execution history.
 
 ```env
-# Filesystem tools (Phase 11F). Disabled by default.
+# Filesystem tools (Phase 11F + 12C). Disabled by default.
 TOOL_FILESYSTEM_ENABLED=false
 # Comma-separated absolute directories that may be accessed.
 TOOL_WORKSPACE_ROOTS=
@@ -446,7 +465,8 @@ TOOL_FILE_MAX_SEARCH_RESULTS=100
 
 See [docs/filesystem_tools.md](docs/filesystem_tools.md) for operation
 contracts, root rules, Windows handling, sensitive-file policy, atomic-write
-behavior, error mapping, tests, and limitations.
+behavior, rename/move rules, confirmation binding, error mapping, tests, and
+limitations.
 
 ## Python execution sandbox
 
@@ -590,6 +610,266 @@ See [docs/tool_history_and_reliability.md](docs/tool_history_and_reliability.md)
 for the state machine, schema and migration, endpoints, retry policy,
 idempotency semantics, restart recovery, observability, retention, security
 properties, tests, and limitations.
+
+## System information tools
+
+Phase 12A adds seven read-only system information tools. They are disabled by
+default and use only the Python standard library. No tool runs PowerShell, CMD,
+a shell, or an arbitrary script.
+
+| Tool | Category | Confirmation | Purpose |
+| --- | --- | --- | --- |
+| `system_os_info` | read-only | no | OS name, release, version, Windows build, and architecture. |
+| `system_hostname` | read-only | no | Local computer hostname (no DNS lookup). |
+| `system_cpu_info` | read-only | no | CPU model text, logical processors, and physical cores when available. |
+| `system_memory_info` | read-only | no | Total, available, and used RAM plus usage percentage. |
+| `system_disk_info` | read-only | no | Total, used, and available space for approved local drives. |
+| `system_python_info` | read-only | no | Python version, implementation, build, compiler, and executable. |
+| `system_summary` | read-only | no | Consolidated human-readable summary of the other sections. |
+
+Every call goes through `ToolExecutor` and the central permission policy. The
+tools are read-only and idempotent, do not require confirmation, and are denied
+in private mode. They are never registered as sensitive tools, so
+`TOOL_ALLOW_SENSITIVE` is not involved.
+
+Security is fail-closed:
+
+- values are collected with `platform`, `socket`, `os`, `shutil`, `sys`, and
+  read-only `ctypes` kernel queries; no shell or subprocess is started;
+- environment variables, file contents, process lists, arbitrary registry
+  values, browser history, documents, and other user data are never enumerated
+  or returned as data; the standard library may consult documented OS/hardware
+  identifiers read-only;
+- disk usage is limited to `TOOL_SYSTEM_INFO_DISK_ROOTS` or, when that is
+  empty, the single drive containing the running interpreter; UNC paths and
+  mapped network or removable volumes are rejected for every configured path;
+- strings and result sizes are bounded; unavailable fields are reported as
+  `null`/`available: false` rather than invented;
+- OS and permission errors become safe structured results, and raw tracebacks
+  are never exposed.
+
+```env
+# System information tools (Phase 12A). Disabled by default.
+TOOL_SYSTEM_INFO_ENABLED=false
+# Comma-separated local disk roots; empty uses the system drive.
+TOOL_SYSTEM_INFO_DISK_ROOTS=
+TOOL_SYSTEM_INFO_MAX_DISKS=8
+```
+
+See [docs/system_information_tools.md](docs/system_information_tools.md) for
+the operation contracts, disk allowlist rules, result shapes, error mapping,
+security properties, tests, and limitations.
+
+## Application launching
+
+Phase 12B adds one sensitive tool, `system_launch_application`, which starts an
+application that the administrator explicitly allowlisted. The model may ask
+for an application by alias, but it can never supply an executable path or
+command-line arguments.
+
+| Tool | Category | Confirmation | Purpose |
+| --- | --- | --- | --- |
+| `system_launch_application` | sensitive | yes (every launch) | Launch one allowlisted desktop application by alias. |
+
+Every call goes through `ToolExecutor` and the central permission policy. The
+tool is disabled by default, requires `TOOL_APPLICATION_LAUNCH_ENABLED=true`,
+requires `TOOL_ALLOW_SENSITIVE=true`, and is denied in private mode. A pending
+confirmation is created only after the alias resolves to a valid approved
+executable, and the stored arguments are re-resolved immediately before the
+process starts.
+
+Allowlist configuration uses `alias=absolute-path` entries:
+
+```env
+# Application launching (Phase 12B). Disabled by default.
+TOOL_APPLICATION_LAUNCH_ENABLED=false
+TOOL_ALLOW_SENSITIVE=false
+# Comma- or newline-separated alias=absolute-path entries (maximum 32).
+TOOL_APPLICATION_ALLOWLIST=
+```
+
+Security is fail-closed:
+
+- only aliases present in `TOOL_APPLICATION_ALLOWLIST` can be launched; the
+  executable path comes exclusively from configuration;
+- aliases are normalized (case, spaces, underscores, hyphens, and punctuation
+  are ignored), while path separators, drive syntax, `=`, `..`, and control
+  characters are rejected;
+- each configured path must be an absolute `.exe` file on a fixed local
+  Windows drive; directories, missing files, relative paths, UNC/network
+  paths, traversal, symlinks, junctions, and reparse points are rejected;
+- launching uses `subprocess.Popen([executable], shell=False)` with no shell
+  interpretation, no extra arguments, no inherited standard streams, and a
+  hidden window;
+- unsupported operating systems fail closed, and no administrator privileges
+  are requested;
+- the result exposes the alias, display name, and process id, but never the
+  executable path, environment variables, or secrets;
+- no existing process is terminated or modified, and nothing is installed,
+  downloaded, or written to the registry or Windows settings.
+
+See [docs/application_launching.md](docs/application_launching.md) for the
+allowlist rules, confirmation flow, security properties, troubleshooting, and
+limitations.
+
+## Process and window inspection
+
+Phase 12D adds five read-only tools for inspecting running processes and the
+foreground desktop window. They use only the Python standard library and
+read-only Windows APIs; no `psutil` dependency is required. No tool can
+terminate, suspend, reprioritize, inject into, or debug a process, and no tool
+can close a window, capture a screenshot, or send keyboard or mouse input.
+
+| Tool | Category | Confirmation | Purpose |
+| --- | --- | --- | --- |
+| `system_process_list` | read-only | no | List running processes with pid and image name. |
+| `system_process_info` | read-only | no | Inspect one process by pid, including bounded CPU and memory data. |
+| `system_application_status` | read-only | no | Check whether an allowlisted application is running. |
+| `system_active_window` | read-only | no | Return the foreground window title, owner pid, and process name. |
+| `system_resource_summary` | read-only | no | Return the top CPU- and memory-consuming processes. |
+
+The tools are disabled by default and denied in private mode. Process
+enumeration uses a bounded Toolhelp32 snapshot; per-process measurements use
+`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetProcessTimes`,
+`GetProcessMemoryInfo`, and `GetExitCodeProcess`. The foreground window is read
+with `GetForegroundWindow`, `GetWindowTextW`, and
+`GetWindowThreadProcessId`.
+
+Privacy protections:
+
+- core operating-system processes are omitted from listings and refused by
+  direct inspection;
+- command lines, environment variables, process memory, owners, profile paths,
+  and executable paths are never read or returned;
+- process names and window titles are bounded and stripped of control
+  characters, and window titles are marked `untrusted`;
+- access-denied and exited processes are reported distinctly, and an
+  inaccessible process is never reported as stopped;
+- `system_application_status` reuses the Phase 12B server-side allowlist and
+  accepts only an alias, never an executable path;
+- unsupported operating systems fail closed.
+
+```env
+# Process and active-window inspection (Phase 12D). Disabled by default.
+TOOL_PROCESS_INSPECTION_ENABLED=false
+TOOL_PROCESS_MAX_RESULTS=25
+TOOL_PROCESS_MAX_MATCHES=20
+TOOL_PROCESS_MAX_NAME_CHARS=128
+TOOL_PROCESS_MAX_TITLE_CHARS=300
+TOOL_PROCESS_CPU_SAMPLE_MS=100
+```
+
+See [docs/process_inspection.md](docs/process_inspection.md) for the API
+details, result shapes, privacy strategy, configuration, tests, and known
+limitations.
+
+## Clipboard, keyboard, and mouse interaction
+
+Phase 12E adds six narrowly scoped desktop-interaction tools. They use only the
+Python standard library `ctypes` module and a small set of Windows APIs; no
+`pyautogui`, `pyperclip`, or other automation dependency is required.
+
+| Tool | Category | Confirmation | Purpose |
+| --- | --- | --- | --- |
+| `system_clipboard_read` | read-only | yes | Read bounded plain Unicode text from the clipboard. |
+| `system_clipboard_write` | reversible | yes | Replace the clipboard with bounded plain Unicode text. |
+| `system_keyboard_press` | reversible | yes | Press one allowlisted key once. |
+| `system_mouse_position` | read-only | no | Return the current pointer coordinates. |
+| `system_mouse_move` | reversible | yes | Move the pointer to validated screen coordinates. |
+| `system_mouse_click` | reversible | yes | Move to validated coordinates and perform one left click. |
+
+The tools are disabled by default, enabled by separate clipboard, keyboard, and
+mouse flags, and denied in private mode. Clipboard reads and every state change
+require a single-use confirmation bound to the owner, conversation, tool, and
+arguments; expired, replayed, altered, rejected, and mismatched confirmations
+are denied without acting.
+
+Restrictions:
+
+- only plain `CF_UNICODETEXT` clipboard content is read or written, bounded in
+  both directions; images, files, HTML, and rich text are ignored;
+- clipboard writes replace the previous contents, disclose the replacement in
+  the confirmation preview, and never store the text in history;
+- clipboard content is marked `untrusted` and is never interpreted as an
+  instruction;
+- only one of fourteen allowlisted keys can be pressed per execution
+  (`ENTER`, `ESC`, `TAB`, `BACKSPACE`, `DELETE`, `SPACE`, `UP`, `DOWN`, `LEFT`,
+  `RIGHT`, `HOME`, `END`, `PAGE_UP`, `PAGE_DOWN`);
+- no arbitrary typing, key combinations, holding, keylogging, or background
+  monitoring;
+- the pointer can be read, moved to validated virtual-screen coordinates, or
+  clicked once with the left button;
+- no double-click, right-click, middle-click, drag, scroll, or continuous
+  movement;
+- no screenshot, screen capture, secure-desktop access, elevation request,
+  privilege adjustment, or other-session control;
+- no PowerShell, CMD, shell, `subprocess`, input hook, or arbitrary script;
+- unsupported operating systems fail closed.
+
+```env
+# Clipboard, keyboard, and mouse interaction (Phase 12E). Disabled by default.
+TOOL_CLIPBOARD_ENABLED=false
+TOOL_CLIPBOARD_MAX_READ_CHARS=4000
+TOOL_CLIPBOARD_MAX_WRITE_CHARS=4000
+
+TOOL_KEYBOARD_ENABLED=false
+
+TOOL_MOUSE_ENABLED=false
+```
+
+See [docs/desktop_interaction.md](docs/desktop_interaction.md) for the API
+details, result shapes, confirmation flow, security properties, configuration,
+tests, and known limitations.
+
+## OS automation security
+
+Phase 12F hardens every Phase 12 OS automation tool without adding new
+capabilities. A deployment-wide master switch (`TOOL_OS_AUTOMATION_ENABLED`)
+must be true in addition to each capability flag; when it is false, all OS tools
+are denied. The central policy is layered on the existing permission engine and
+cannot be changed by the model.
+
+- **Emergency stop:** an authenticated owner can call
+  `POST /api/tools/emergency-stop` to block new OS operations and invalidate
+  pending confirmations. Recovery requires the server-side
+  `TOOL_OS_EMERGENCY_RECOVERY_TOKEN`; authentication alone is not enough. The
+  stop never kills processes, touches ASTA/PostgreSQL, deletes files, or changes
+  settings. It is process-local and clears on restart.
+- **Rate limits:** owner-isolated, server-side sliding-window limits are applied
+  before every OS execution. The model cannot raise them. The limiter is
+  in-memory and per process.
+- **Audit logging:** one metadata-only event per OS execution and emergency-stop
+  action (timestamp, owner, conversation, tool, category, status, confirmation,
+  duration, safe error, rate-limit outcome). Argument values, clipboard text,
+  file contents and paths, command lines, window titles, process names, and
+  tokens are never logged.
+- **Untrusted data:** clipboard text, window titles, process names, filenames,
+  file contents, application metadata, and search results are data only. They
+  cannot grant permission, skip confirmation, change settings, or invoke the
+  emergency stop.
+- **Failure handling:** execution fails closed, non-idempotent and
+  confirmation-requiring actions are never retried automatically, and an
+  uncertain outcome is never reported as success. Confirmed OS side effects are
+  not transactional and may not be rollbackable.
+
+All existing restrictions remain: workspace-confined filesystem access, no
+permanent deletion, allowlist-only application launching with no arguments,
+shell, or elevation, read-only process inspection, and bounded clipboard,
+keyboard, and mouse interaction.
+
+```env
+# OS automation security (Phase 12F). Master switch plus per-capability flags.
+TOOL_OS_AUTOMATION_ENABLED=false
+TOOL_OS_RATE_LIMIT_ENABLED=true
+TOOL_OS_MAX_CALLS_PER_MINUTE=30
+TOOL_OS_MAX_STATE_CHANGES_PER_MINUTE=10
+TOOL_OS_MAX_CALLS_PER_HOUR=300
+# Leave empty to disable emergency-stop recovery.
+TOOL_OS_EMERGENCY_RECOVERY_TOKEN=
+```
+
+See [docs/os_automation_security.md](docs/os_automation_security.md) for the full
+model, operator runbook, and known single-process limitations.
 
 ## Authentication and local-network access
 
@@ -863,6 +1143,27 @@ TOOL_FILE_MAX_WRITE_BYTES=100000
 TOOL_FILE_MAX_LIST_ENTRIES=500
 TOOL_FILE_MAX_SEARCH_RESULTS=100
 
+# System information tools (Phase 12A). Disabled by default.
+# Empty disk roots uses the drive containing the running interpreter.
+TOOL_SYSTEM_INFO_ENABLED=false
+TOOL_SYSTEM_INFO_DISK_ROOTS=
+TOOL_SYSTEM_INFO_MAX_DISKS=8
+
+# Process and active-window inspection (Phase 12D). Disabled by default.
+TOOL_PROCESS_INSPECTION_ENABLED=false
+TOOL_PROCESS_MAX_RESULTS=25
+TOOL_PROCESS_MAX_MATCHES=20
+TOOL_PROCESS_MAX_NAME_CHARS=128
+TOOL_PROCESS_MAX_TITLE_CHARS=300
+TOOL_PROCESS_CPU_SAMPLE_MS=100
+
+# Clipboard, keyboard, and mouse interaction (Phase 12E). Disabled by default.
+TOOL_CLIPBOARD_ENABLED=false
+TOOL_CLIPBOARD_MAX_READ_CHARS=4000
+TOOL_CLIPBOARD_MAX_WRITE_CHARS=4000
+TOOL_KEYBOARD_ENABLED=false
+TOOL_MOUSE_ENABLED=false
+
 # Python execution sandbox (Phase 11G). Disabled by default.
 # Requires Windows AppContainer, a standalone Python 3 interpreter, and
 # TOOL_ALLOW_SENSITIVE=true plus per-call confirmation.
@@ -1001,6 +1302,37 @@ SQLite):
 ```powershell
 cd backend
 ..\venv\Scripts\python.exe -m unittest tests.test_phase11h_tool_calling_api -v
+```
+
+Phase 12A system information checks (mocked OS values; temporary disk roots):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase12a_system_info -v
+```
+
+Phase 12B application launching checks (mocked process launches; temporary
+executable fixtures):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase12b_application_launcher -v
+```
+
+Phase 12D process and window inspection checks (mocked Windows APIs; no real
+process is inspected or modified):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase12d_process_inspection -v
+```
+
+Phase 12E clipboard, keyboard, and mouse checks (mocked Windows APIs; no real
+clipboard access or input is performed):
+
+```powershell
+cd backend
+..\venv\Scripts\python.exe -m unittest tests.test_phase12e_desktop_interaction -v
 ```
 
 Combined Phase 11A–11H checks:

@@ -185,7 +185,17 @@ class ToolConfirmationActionResponse(BaseModel):
     result: ToolResultResponse | None = None
 
 
+class EmergencyStopResponse(BaseModel):
+    """Safe, metadata-only view of the OS automation emergency stop."""
+
+    engaged: bool
+    engaged_at: datetime | None = None
+    engaged_by_user_id: int | None = None
+    recovery_configured: bool = False
+
+
 __all__ = [
+    "EmergencyStopResponse",
     "ToolConfirmationActionResponse",
     "ToolConfirmationListResponse",
     "ToolConfirmationResponse",

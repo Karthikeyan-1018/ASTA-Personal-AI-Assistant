@@ -420,6 +420,35 @@ class ToolConfirmationService:
             confirmation_id=confirmation_id,
         )
 
+    async def reject_all_pending(
+        self,
+        session: AsyncSession,
+    ) -> int:
+        """Invalidate every pending confirmation without executing anything.
+
+        Used by the Phase 12F emergency stop. It is deliberately not
+        owner-scoped: the emergency stop is a system-wide safety control.
+        """
+
+        now = _utcnow()
+
+        result = await session.execute(
+            update(ToolConfirmation)
+            .where(
+                ToolConfirmation.status == ToolConfirmationStatus.PENDING,
+            )
+            .values(
+                status=ToolConfirmationStatus.REJECTED,
+                resolved_at=now,
+                arguments={},
+            )
+        )
+
+        if result.rowcount:
+            await session.commit()
+
+        return int(result.rowcount or 0)
+
     async def mark_failed(
         self,
         session: AsyncSession,

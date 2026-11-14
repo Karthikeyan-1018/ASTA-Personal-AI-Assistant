@@ -20,6 +20,7 @@ import app.models  # noqa: F401  (registers every ORM table)
 from app.core.config import settings
 from app.database.base import Base
 from app.models.user import User
+from app.tools import os_security
 from app.tools.base import BaseTool, ToolContext
 from app.tools.enums import ToolCategory
 from app.tools.executor import tool_executor
@@ -73,6 +74,10 @@ class ToolEngineTestBase(unittest.IsolatedAsyncioTestCase):
     """Two owners, an isolated database, and an isolated workspace root."""
 
     async def asyncSetUp(self):
+        # The OS automation rate limiter and emergency stop are process-local
+        # by design, so reset them for deterministic, isolated tests.
+        os_security.reset_state_for_tests()
+
         self.engine = create_async_engine(
             "sqlite+aiosqlite:///:memory:",
             connect_args={"check_same_thread": False},
@@ -108,6 +113,7 @@ class ToolEngineTestBase(unittest.IsolatedAsyncioTestCase):
         )
 
     async def asyncTearDown(self):
+        os_security.reset_state_for_tests()
         self.workspace.cleanup()
         await self.engine.dispose()
 

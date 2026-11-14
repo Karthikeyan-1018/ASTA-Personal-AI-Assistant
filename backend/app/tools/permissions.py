@@ -11,10 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.core.config import settings
+from app.tools import os_security
 from app.tools.base import BaseTool
 from app.tools.enums import ToolCategory, ToolErrorCategory
 from app.tools.exceptions import (
+    ToolConfigurationError,
     ToolDisabledError,
+    ToolEmergencyStopError,
     ToolPermissionError,
     ToolPrivateRequestError,
 )
@@ -38,6 +41,19 @@ class PermissionPolicy:
         *,
         private: bool,
     ) -> PermissionDecision:
+
+        # Phase 12F: the central OS policy is consulted first. It is additive;
+        # non-OS tools are unaffected, and it never replaces the checks below.
+        os_decision = os_security.evaluate(tool)
+
+        if not os_decision.allowed:
+            return PermissionDecision(
+                allowed=False,
+                requires_confirmation=False,
+                category=tool.category,
+                reason=os_decision.reason,
+                error_category=os_decision.error_category,
+            )
 
         if not tool.enabled:
             return PermissionDecision(
@@ -117,6 +133,20 @@ class PermissionPolicy:
 
         if decision.error_category == ToolErrorCategory.DISABLED:
             raise ToolDisabledError(decision.reason or "Tool is disabled.")
+
+        if decision.error_category == ToolErrorCategory.CONFIGURATION:
+            raise ToolConfigurationError(
+                decision.reason or "Tool configuration is invalid."
+            )
+
+        if (
+            os_security.is_os_tool(tool)
+            and os_security.is_emergency_stop_engaged()
+        ):
+            raise ToolEmergencyStopError(
+                decision.reason
+                or "OS automation is blocked by the emergency stop."
+            )
 
         if private and not tool.allowed_in_private:
             raise ToolPrivateRequestError(

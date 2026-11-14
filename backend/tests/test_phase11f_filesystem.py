@@ -68,6 +68,7 @@ class FilesystemUnitTestBase(unittest.IsolatedAsyncioTestCase):
 
     def configure(self, roots=None, **overrides):
         values = {
+            "TOOL_OS_AUTOMATION_ENABLED": True,
             "TOOL_FILESYSTEM_ENABLED": True,
             "TOOL_WORKSPACE_ROOTS": (
                 str(self.root) if roots is None else roots
@@ -1144,6 +1145,7 @@ class FilesystemExecutorTests(ToolEngineTestBase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         self.settings(
+            TOOL_OS_AUTOMATION_ENABLED=True,
             TOOL_FILESYSTEM_ENABLED=True,
             TOOL_WORKSPACE_ROOTS=self.workspace.name,
             TOOL_FILE_MAX_READ_BYTES=200_000,

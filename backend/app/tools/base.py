@@ -78,6 +78,12 @@ class BaseTool(ABC):
     # Confirmation-requiring tools are never retried automatically.
     idempotent: ClassVar[bool] = False
 
+    # Phase 12F marker. Non-empty values identify a built-in operating-system
+    # automation capability (for example ``filesystem`` or ``clipboard``). The
+    # central OS security policy uses this marker; ordinary tools leave it
+    # unset and are unaffected.
+    os_capability: ClassVar[str | None] = None
+
     @property
     def enabled(self) -> bool:
         """Return whether configuration currently enables this tool."""

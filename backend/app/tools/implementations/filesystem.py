@@ -14,11 +14,17 @@ Security properties:
   rejected.
 * Writes are bounded, text-only, and atomic. Creating or updating a file always
   requires explicit confirmation.
+* Folder creation, rename, and move are bounded, non-recursive, and require
+  explicit confirmation. Destinations are never overwritten.
+* Paths are validated when a confirmation is proposed and again immediately
+  before the operation runs. Rename and move refuse symbolic links, junctions,
+  and other reparse points.
 * There is no delete tool, no recursive mutation, and no way to execute a file.
 """
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import os
 import re
@@ -51,6 +57,7 @@ SENSITIVE_DIR_NAMES = {
     ".gnupg",
     ".git",
     ".kube",
+    "agriculture_db",
 }
 
 SENSITIVE_FILE_NAMES = {
@@ -62,8 +69,14 @@ SENSITIVE_FILE_NAMES = {
     ".pgpass",
     ".pypirc",
     ".vault-token",
+    "cookies",
     "credentials",
     "credentials.json",
+    "key3.db",
+    "key4.db",
+    "local state",
+    "login data",
+    "logins.json",
     "secrets",
     "secrets.json",
     "id_dsa",
@@ -232,6 +245,47 @@ POSIX_SYSTEM_DIRECTORIES = (
     "/var/lib",
 )
 
+# Browser profiles and operating-system credential stores are never valid
+# workspace roots. A root may not live inside one of these locations and may
+# not contain one. The relative paths are resolved against the listed
+# environment variable, so no personal path is embedded in the source.
+_PROTECTED_RELATIVE_PATHS = (
+    ("LOCALAPPDATA", "Google/Chrome/User Data"),
+    ("LOCALAPPDATA", "Google/Chrome Beta/User Data"),
+    ("LOCALAPPDATA", "Google/Chrome SxS/User Data"),
+    ("LOCALAPPDATA", "Chromium/User Data"),
+    ("LOCALAPPDATA", "Microsoft/Edge/User Data"),
+    ("LOCALAPPDATA", "BraveSoftware/Brave-Browser/User Data"),
+    ("LOCALAPPDATA", "Microsoft/Credentials"),
+    ("LOCALAPPDATA", "Microsoft/Vault"),
+    ("APPDATA", "Google/Chrome/User Data"),
+    ("APPDATA", "Microsoft/Edge/User Data"),
+    ("APPDATA", "Mozilla/Firefox/Profiles"),
+    ("APPDATA", "Opera Software"),
+    ("APPDATA", "Microsoft/Credentials"),
+    ("APPDATA", "Microsoft/Vault"),
+    ("USERPROFILE", ".ssh"),
+    ("USERPROFILE", ".aws"),
+    ("USERPROFILE", ".azure"),
+    ("USERPROFILE", ".gnupg"),
+    ("USERPROFILE", ".kube"),
+    ("USERPROFILE", ".password-store"),
+)
+
+_POSIX_PROTECTED_RELATIVE_PATHS = (
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".gnupg",
+    ".kube",
+    ".password-store",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".config/BraveSoftware",
+    ".mozilla/firefox",
+    ".local/share/keyrings",
+)
+
 MAX_SEARCH_DIRECTORIES = 5000
 MAX_BINARY_SAMPLE_BYTES = 8192
 
@@ -241,10 +295,15 @@ class _FsBase(BaseTool):
 
     allowed_in_private: ClassVar[bool] = False
     provider_label: ClassVar[str] = "filesystem"
+    os_capability: ClassVar[str | None] = "filesystem"
 
     @property
     def enabled(self) -> bool:
-        return bool(settings.TOOL_FILESYSTEM_ENABLED and _workspace_roots())
+        return bool(
+            settings.TOOL_OS_AUTOMATION_ENABLED
+            and settings.TOOL_FILESYSTEM_ENABLED
+            and _workspace_roots()
+        )
 
     def _roots(self) -> list[Path]:
         roots = _workspace_roots()
@@ -269,6 +328,22 @@ class _FsBase(BaseTool):
             must_exist=must_exist,
             for_write=for_write,
         )
+
+    def validate_arguments(self, arguments):
+        """Validate the schema and resolve every path before confirmation.
+
+        The executor calls this again with the stored payload immediately
+        before execution, so a path that changes between proposal and approval
+        is re-checked. ``execute`` resolves once more right before touching the
+        filesystem.
+        """
+
+        validated = super().validate_arguments(arguments)
+        self._validate_paths(validated)
+        return validated
+
+    def _validate_paths(self, arguments) -> None:
+        """Proposal-time path checks. Tools override this hook."""
 
 
 class FsListInput(StrictModel):
@@ -334,6 +409,9 @@ class FsListTool(_FsBase):
             },
         )
 
+    def _validate_paths(self, arguments: FsListInput) -> None:
+        self._resolve(arguments.path, must_exist=True)
+
 
 class FsSearchInput(StrictModel):
     pattern: str = Field(
@@ -365,18 +443,7 @@ class FsSearchTool(_FsBase):
         context: ToolContext,
         arguments: FsSearchInput,
     ) -> ToolResult:
-        pattern = arguments.pattern.strip()
-
-        if _has_control_characters(pattern):
-            raise ToolValidationError(
-                "The pattern contains unsupported characters."
-            )
-
-        if "/" in pattern or "\\" in pattern or pattern in {".", ".."}:
-            raise ToolValidationError(
-                "The pattern must be a file-name glob without separators."
-            )
-
+        pattern = _validated_search_pattern(arguments.pattern)
         target = self._resolve(arguments.path, must_exist=True)
 
         if not target.is_dir():
@@ -456,6 +523,10 @@ class FsSearchTool(_FsBase):
             },
         )
 
+    def _validate_paths(self, arguments: FsSearchInput) -> None:
+        _validated_search_pattern(arguments.pattern)
+        self._resolve(arguments.path, must_exist=True)
+
 
 class FsReadInput(StrictModel):
     path: str = Field(
@@ -519,6 +590,14 @@ class FsReadTool(_FsBase):
             },
             metadata={"untrusted_content": True},
         )
+
+    def _validate_paths(self, arguments: FsReadInput) -> None:
+        target = self._resolve(arguments.path, must_exist=True)
+
+        if not target.is_file():
+            raise ToolExecutionError("The requested path is not a file.")
+
+        _require_text_suffix(target)
 
 
 class FsCreateInput(StrictModel):
@@ -601,6 +680,32 @@ class FsCreateTool(_FsBase):
             },
         )
 
+    def _validate_paths(self, arguments: FsCreateInput) -> None:
+        target = self._resolve(
+            arguments.path,
+            must_exist=False,
+            for_write=True,
+        )
+
+        exists = target.exists()
+
+        if exists and not arguments.overwrite:
+            raise ToolExecutionError(
+                "That file already exists. Set overwrite to true only if "
+                "replacing it is intended."
+            )
+
+        if target.is_dir():
+            raise ToolExecutionError("The requested path is a directory.")
+
+        if not target.parent.is_dir():
+            raise ToolExecutionError(
+                "The parent directory does not exist."
+            )
+
+        _require_text_suffix(target)
+        _bounded_bytes(arguments.content, write=True)
+
     def summarize(self, arguments: FsCreateInput) -> str:
         action = "Replace" if arguments.overwrite else "Create"
         return (
@@ -666,6 +771,21 @@ class FsUpdateTool(_FsBase):
             },
         )
 
+    def _validate_paths(self, arguments: FsUpdateInput) -> None:
+        # Existence is a functional check that ``execute`` performs immediately
+        # before writing. Proposal-time validation is limited to containment,
+        # link policy, sensitive names, suffix, and content bounds so a
+        # confirmation preview can still be built for a path that is created
+        # or removed concurrently.
+        target = self._resolve(
+            arguments.path,
+            must_exist=False,
+            for_write=True,
+        )
+
+        _require_text_suffix(target)
+        _bounded_bytes(arguments.content, write=True)
+
     def summarize(self, arguments: FsUpdateInput) -> str:
         return (
             f"Replace contents of '{arguments.path}' "
@@ -726,6 +846,328 @@ class FsMetadataTool(_FsBase):
             },
         )
 
+    def _validate_paths(self, arguments: FsMetadataInput) -> None:
+        self._resolve(arguments.path, must_exist=True)
+
+
+class FsExistsInput(StrictModel):
+    path: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="File or directory path inside an approved workspace.",
+    )
+
+
+class FsExistsTool(_FsBase):
+    name: ClassVar[str] = "fs_exists"
+    description: ClassVar[str] = (
+        "Check whether a file or directory exists inside an approved "
+        "workspace. Does not read file contents."
+    )
+    category: ClassVar[ToolCategory] = ToolCategory.READ_ONLY
+    input_model: ClassVar[type[StrictModel]] = FsExistsInput
+    idempotent: ClassVar[bool] = True
+
+    async def execute(
+        self,
+        context: ToolContext,
+        arguments: FsExistsInput,
+    ) -> ToolResult:
+        roots = self._roots()
+        target = self._resolve(arguments.path, must_exist=False)
+        requested = _requested_candidate(arguments.path, roots)
+
+        exists = target.exists()
+        entry_type: str | None = None
+
+        if exists:
+            if target.is_dir():
+                entry_type = "directory"
+            elif target.is_file():
+                entry_type = "file"
+            else:
+                entry_type = "other"
+
+        return success_result(
+            tool_name=self.name,
+            data={
+                "path": _relative_label(target, roots),
+                "exists": exists,
+                "type": entry_type,
+                "is_symlink": _is_link_like(requested),
+            },
+        )
+
+    def _validate_paths(self, arguments: FsExistsInput) -> None:
+        self._resolve(arguments.path, must_exist=False)
+
+
+class FsMkdirInput(StrictModel):
+    path: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="New directory path inside an approved workspace.",
+    )
+
+
+class FsMkdirTool(_FsBase):
+    name: ClassVar[str] = "fs_mkdir"
+    description: ClassVar[str] = (
+        "Create one new directory inside an approved workspace. The parent "
+        "directory must already exist. Requires user confirmation."
+    )
+    category: ClassVar[ToolCategory] = ToolCategory.REVERSIBLE
+    requires_confirmation: ClassVar[bool] = True
+    input_model: ClassVar[type[StrictModel]] = FsMkdirInput
+
+    async def execute(
+        self,
+        context: ToolContext,
+        arguments: FsMkdirInput,
+    ) -> ToolResult:
+        roots = self._roots()
+        target = self._resolve(
+            arguments.path,
+            must_exist=False,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.path, roots),
+            "created",
+        )
+
+        if target.exists():
+            raise ToolExecutionError("That folder already exists.")
+
+        if not target.parent.is_dir():
+            raise ToolExecutionError(
+                "The parent directory does not exist."
+            )
+
+        try:
+            os.mkdir(str(target))
+
+        except FileExistsError as error:
+            raise ToolExecutionError(
+                "That folder already exists."
+            ) from error
+
+        except OSError as error:
+            raise ToolExecutionError(
+                "The folder could not be created."
+            ) from error
+
+        return success_result(
+            tool_name=self.name,
+            data={
+                "path": _relative_label(target, roots),
+                "created": True,
+            },
+        )
+
+    def _validate_paths(self, arguments: FsMkdirInput) -> None:
+        roots = self._roots()
+        target = self._resolve(
+            arguments.path,
+            must_exist=False,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.path, roots),
+            "created",
+        )
+
+        if target.exists():
+            raise ToolExecutionError("That folder already exists.")
+
+        if not target.parent.is_dir():
+            raise ToolExecutionError(
+                "The parent directory does not exist."
+            )
+
+    def summarize(self, arguments: FsMkdirInput) -> str:
+        return f"Create folder '{arguments.path}'."
+
+
+class FsRenameInput(StrictModel):
+    path: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="Existing file or directory path inside an approved workspace.",
+    )
+    new_name: str = Field(
+        min_length=1,
+        max_length=255,
+        description=(
+            "New name for the entry. It must be a single name without path "
+            "separators and the entry stays in the same directory."
+        ),
+    )
+
+
+class FsRenameTool(_FsBase):
+    name: ClassVar[str] = "fs_rename"
+    description: ClassVar[str] = (
+        "Rename a file or directory inside an approved workspace. The entry "
+        "stays in the same directory, an existing destination is never "
+        "overwritten, and links are refused. Requires user confirmation."
+    )
+    category: ClassVar[ToolCategory] = ToolCategory.REVERSIBLE
+    requires_confirmation: ClassVar[bool] = True
+    input_model: ClassVar[type[StrictModel]] = FsRenameInput
+
+    async def execute(
+        self,
+        context: ToolContext,
+        arguments: FsRenameInput,
+    ) -> ToolResult:
+        roots = self._roots()
+        source = self._resolve(
+            arguments.path,
+            must_exist=True,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.path, roots),
+            "renamed",
+        )
+        _ensure_not_root(source, roots, "renamed")
+
+        name = _validate_entry_name(arguments.new_name)
+        destination = source.parent / name
+        _validate_destination(destination, roots, source=source)
+        _rename_no_overwrite(source, destination, action="renamed")
+
+        return success_result(
+            tool_name=self.name,
+            data={
+                "path": _relative_label(source, roots),
+                "new_path": _relative_label(destination, roots),
+                "renamed": True,
+            },
+        )
+
+    def _validate_paths(self, arguments: FsRenameInput) -> None:
+        roots = self._roots()
+        source = self._resolve(
+            arguments.path,
+            must_exist=True,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.path, roots),
+            "renamed",
+        )
+        _ensure_not_root(source, roots, "renamed")
+
+        name = _validate_entry_name(arguments.new_name)
+        _validate_destination(
+            source.parent / name,
+            roots,
+            source=source,
+        )
+
+    def summarize(self, arguments: FsRenameInput) -> str:
+        return (
+            f"Rename '{arguments.path}' to '{arguments.new_name}'."
+        )
+
+
+class FsMoveInput(StrictModel):
+    source: str = Field(
+        min_length=1,
+        max_length=1024,
+        description="Existing file or directory path inside an approved workspace.",
+    )
+    destination: str = Field(
+        min_length=1,
+        max_length=1024,
+        description=(
+            "New path, including the new name, inside an approved workspace. "
+            "An existing destination is never overwritten."
+        ),
+    )
+
+
+class FsMoveTool(_FsBase):
+    name: ClassVar[str] = "fs_move"
+    description: ClassVar[str] = (
+        "Move a file or directory between approved workspace directories. "
+        "The destination must not exist, cross-volume moves are refused, "
+        "links are refused, and folders cannot be moved into themselves. "
+        "Requires user confirmation."
+    )
+    category: ClassVar[ToolCategory] = ToolCategory.REVERSIBLE
+    requires_confirmation: ClassVar[bool] = True
+    input_model: ClassVar[type[StrictModel]] = FsMoveInput
+
+    async def execute(
+        self,
+        context: ToolContext,
+        arguments: FsMoveInput,
+    ) -> ToolResult:
+        roots = self._roots()
+        source = self._resolve(
+            arguments.source,
+            must_exist=True,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.source, roots),
+            "moved",
+        )
+        _ensure_not_root(source, roots, "moved")
+
+        destination = self._resolve(
+            arguments.destination,
+            must_exist=False,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.destination, roots),
+            "used as a destination",
+        )
+        _validate_destination(destination, roots, source=source)
+        _rename_no_overwrite(source, destination, action="moved")
+
+        return success_result(
+            tool_name=self.name,
+            data={
+                "source": _relative_label(source, roots),
+                "destination": _relative_label(destination, roots),
+                "moved": True,
+            },
+        )
+
+    def _validate_paths(self, arguments: FsMoveInput) -> None:
+        roots = self._roots()
+        source = self._resolve(
+            arguments.source,
+            must_exist=True,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.source, roots),
+            "moved",
+        )
+        _ensure_not_root(source, roots, "moved")
+
+        destination = self._resolve(
+            arguments.destination,
+            must_exist=False,
+            for_write=True,
+        )
+        _reject_link_like(
+            _requested_candidate(arguments.destination, roots),
+            "used as a destination",
+        )
+        _validate_destination(destination, roots, source=source)
+
+    def summarize(self, arguments: FsMoveInput) -> str:
+        return (
+            f"Move '{arguments.source}' to '{arguments.destination}'."
+        )
+
 
 def _workspace_roots() -> list[Path]:
     roots: list[Path] = []
@@ -767,13 +1209,78 @@ def _forbidden_root(path: Path) -> bool:
     if _is_denied(resolved):
         return True
 
+    home = _user_home()
+
+    if home is not None and _inside(home, [resolved]):
+        # The whole user profile (or an ancestor of it) is never a workspace.
+        return True
+
     for system in _system_directories():
         # Reject both "root is inside a system directory" and "root contains a
         # system directory". The second rule rejects broad roots such as C:\.
         if _inside(resolved, [system]) or _inside(system, [resolved]):
             return True
 
+    for protected in _protected_locations():
+        # Browser profiles and credential stores are denied in both
+        # directions: a root may not live inside one and may not contain one.
+        if _inside(resolved, [protected]) or _inside(protected, [resolved]):
+            return True
+
     return False
+
+
+def _user_home() -> Path | None:
+    try:
+        return Path.home().resolve(strict=False)
+
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _protected_locations() -> list[Path]:
+    """Return browser-profile and credential-store locations for this host."""
+
+    locations: list[Path] = []
+
+    if os.name == "nt":
+        pairs = _PROTECTED_RELATIVE_PATHS
+
+        for variable, relative in pairs:
+            base = os.environ.get(variable)
+
+            if not base:
+                continue
+
+            try:
+                resolved = Path(base).joinpath(relative).resolve(
+                    strict=False
+                )
+
+            except (OSError, RuntimeError, ValueError):
+                continue
+
+            if resolved not in locations:
+                locations.append(resolved)
+
+        return locations
+
+    home = _user_home()
+
+    if home is None:
+        return locations
+
+    for relative in _POSIX_PROTECTED_RELATIVE_PATHS:
+        try:
+            resolved = home.joinpath(relative).resolve(strict=False)
+
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+        if resolved not in locations:
+            locations.append(resolved)
+
+    return locations
 
 
 def _system_directories() -> list[Path]:
@@ -832,6 +1339,22 @@ def _has_control_characters(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
+def _validated_search_pattern(raw: str) -> str:
+    pattern = raw.strip()
+
+    if _has_control_characters(pattern):
+        raise ToolValidationError(
+            "The pattern contains unsupported characters."
+        )
+
+    if "/" in pattern or "\\" in pattern or pattern in {".", ".."}:
+        raise ToolValidationError(
+            "The pattern must be a file-name glob without separators."
+        )
+
+    return pattern
+
+
 def _is_denied(path: Path) -> bool:
     for part in path.parts:
         normalized = _normalized_name(part)
@@ -886,12 +1409,37 @@ def _validate_raw_path(raw: str) -> str:
             "The file path contains unsupported control characters."
         )
 
+    _validate_network_and_device_path(raw)
+    _validate_no_parent_traversal(cleaned)
+
     if os.name == "nt":
         # Validate the original value so a trailing space cannot be silently
         # normalized into a different Windows path.
         _validate_windows_path(raw)
 
     return cleaned
+
+
+def _validate_network_and_device_path(raw: str) -> None:
+    """Reject UNC shares and Windows device namespaces before resolution."""
+
+    normalized = raw.replace("\\", "/")
+
+    if normalized.startswith("//"):
+        raise ToolValidationError(
+            "UNC, network, and Windows device paths are not allowed."
+        )
+
+
+def _validate_no_parent_traversal(raw: str) -> None:
+    """Reject every ``..`` segment rather than relying on resolution."""
+
+    separators = r"[\\/]+" if os.name == "nt" else "/"
+
+    if ".." in re.split(separators, raw):
+        raise ToolValidationError(
+            "Parent-directory traversal is not allowed."
+        )
 
 
 def _validate_windows_path(raw: str) -> None:
@@ -952,6 +1500,176 @@ def _requested_candidate(raw: str, roots: list[Path]) -> Path:
         candidate = roots[0] / candidate
 
     return candidate
+
+
+def _is_link_like(path: Path) -> bool:
+    """Return True for a symlink, junction, or other Windows reparse point."""
+
+    try:
+        info = os.lstat(path)
+
+    except FileNotFoundError:
+        return False
+
+    except OSError:
+        # Fail closed when the entry cannot be inspected safely.
+        return True
+
+    if stat.S_ISLNK(info.st_mode):
+        return True
+
+    attributes = getattr(info, "st_file_attributes", 0)
+
+    return bool(
+        attributes
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _reject_link_like(path: Path, action: str) -> None:
+    if _is_link_like(path):
+        raise ToolValidationError(
+            f"Symbolic links, junctions, and reparse points cannot be "
+            f"{action}."
+        )
+
+
+def _ensure_not_root(path: Path, roots: list[Path], action: str) -> None:
+    for root in roots:
+        if _norm(path) == _norm(root):
+            raise ToolExecutionError(
+                f"An approved workspace root cannot be {action}."
+            )
+
+
+def _validate_destination(
+    destination: Path,
+    roots: list[Path],
+    *,
+    source: Path | None = None,
+) -> None:
+    """Validate a rename or move destination without touching it."""
+
+    if not _inside(destination, roots):
+        raise ToolValidationError(
+            "That path is outside the approved workspace."
+        )
+
+    if _is_denied(destination):
+        raise ToolValidationError(
+            "Access to credential and secret files is denied."
+        )
+
+    if _is_link_like(destination):
+        raise ToolExecutionError(
+            "The destination is a symbolic link, junction, or reparse point."
+        )
+
+    if destination.exists():
+        raise ToolExecutionError("The destination already exists.")
+
+    if not destination.parent.is_dir():
+        raise ToolExecutionError(
+            "The destination folder does not exist."
+        )
+
+    _ensure_not_root(destination, roots, "replaced")
+
+    for root in roots:
+        if _inside(root, [destination]):
+            raise ToolExecutionError(
+                "The destination cannot contain an approved workspace root."
+            )
+
+    if (
+        source is not None
+        and source.is_dir()
+        and _inside(destination, [source])
+    ):
+        raise ToolExecutionError(
+            "A folder cannot be moved inside itself."
+        )
+
+
+def _validate_entry_name(raw: str) -> str:
+    """Validate a single new file or folder name."""
+
+    if not isinstance(raw, str):
+        raise ToolValidationError("A file name is required.")
+
+    if raw != raw.strip():
+        raise ToolValidationError(
+            "A file name may not start or end with whitespace."
+        )
+
+    if not raw:
+        raise ToolValidationError("A file name is required.")
+
+    if _has_control_characters(raw):
+        raise ToolValidationError(
+            "The file name contains unsupported control characters."
+        )
+
+    if "/" in raw or "\\" in raw:
+        raise ToolValidationError(
+            "A file name may not contain path separators."
+        )
+
+    if raw in {".", ".."}:
+        raise ToolValidationError("A file name may not be a relative alias.")
+
+    if raw.endswith((" ", ".")):
+        raise ToolValidationError(
+            "A file name may not end with a dot or space."
+        )
+
+    if os.name == "nt" and _reserved_windows_name(raw):
+        raise ToolValidationError(
+            "Windows reserved device names are not allowed."
+        )
+
+    if _is_denied(Path(raw)):
+        raise ToolValidationError(
+            "Access to credential and secret files is denied."
+        )
+
+    return raw
+
+
+def _rename_no_overwrite(
+    source: Path,
+    destination: Path,
+    *,
+    action: str,
+) -> None:
+    """Rename or move an entry without ever replacing a destination.
+
+    Windows ``os.rename`` refuses an existing destination. POSIX
+    ``os.rename`` replaces it, so the existence check in
+    ``_validate_destination`` is repeated immediately before the call. The
+    remaining POSIX race is documented as a known limitation.
+    """
+
+    if destination.exists() or _is_link_like(destination):
+        raise ToolExecutionError("The destination already exists.")
+
+    try:
+        os.rename(str(source), str(destination))
+
+    except FileExistsError as error:
+        raise ToolExecutionError(
+            "The destination already exists."
+        ) from error
+
+    except OSError as error:
+        if error.errno == errno.EXDEV:
+            raise ToolExecutionError(
+                "Moving between different volumes is not supported."
+            ) from error
+
+        raise ToolExecutionError(
+            f"The file or folder could not be {action}."
+        ) from error
 
 
 def _resolve_path(
@@ -1245,13 +1963,31 @@ FS_TOOLS = (
     FsMetadataTool(),
 )
 
+# Phase 12C adds existence checks, folder creation, rename, and move. The
+# original tuple is kept unchanged so existing callers and tests keep their
+# exact six-tool contract.
+FS_12C_TOOLS = (
+    FsExistsTool(),
+    FsMkdirTool(),
+    FsRenameTool(),
+    FsMoveTool(),
+)
+
+FS_ALL_TOOLS = FS_TOOLS + FS_12C_TOOLS
+
 
 __all__ = [
+    "FS_12C_TOOLS",
+    "FS_ALL_TOOLS",
     "FS_TOOLS",
     "FsCreateTool",
+    "FsExistsTool",
     "FsListTool",
     "FsMetadataTool",
+    "FsMkdirTool",
+    "FsMoveTool",
     "FsReadTool",
+    "FsRenameTool",
     "FsSearchTool",
     "FsUpdateTool",
 ]

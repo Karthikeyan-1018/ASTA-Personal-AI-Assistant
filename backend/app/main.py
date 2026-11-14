@@ -26,6 +26,7 @@ from app.core.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.scheduler.runner import BackgroundScheduler
 from app.services.tool_history_service import tool_history_service
+from app.tools import os_security
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,16 @@ async def lifespan(app: FastAPI):
     """
 
     scheduler: BackgroundScheduler | None = None
+
+    # Phase 12F: surface OS automation configuration problems at startup.
+    # Validation never enables a capability; invalid limits fall back to the
+    # conservative defaults at use time.
+    try:
+        for problem in os_security.validate_configuration():
+            logger.warning("OS automation configuration: %s", problem)
+
+    except Exception:
+        logger.exception("OS automation configuration validation failed.")
 
     if settings.TOOL_RECOVERY_ON_STARTUP:
         try:

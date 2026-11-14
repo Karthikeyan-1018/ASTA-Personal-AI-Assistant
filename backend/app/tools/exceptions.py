@@ -81,6 +81,14 @@ class ToolMalformedCallError(ToolError):
     """The provider returned a malformed or unsupported tool call."""
 
 
+class ToolRateLimitError(ToolPermissionError):
+    """The owner exceeded a server-side OS automation rate limit."""
+
+
+class ToolEmergencyStopError(ToolPermissionError):
+    """OS automation is blocked by the emergency stop."""
+
+
 __all__ = [
     "ToolConfirmationExpiredError",
     "ToolConfirmationLimitError",
@@ -90,6 +98,7 @@ __all__ = [
     "ToolConfirmationResolvedError",
     "ToolConfigurationError",
     "ToolDisabledError",
+    "ToolEmergencyStopError",
     "ToolError",
     "ToolExecutionError",
     "ToolMalformedCallError",
@@ -97,6 +106,7 @@ __all__ = [
     "ToolPermissionError",
     "ToolPrivateRequestError",
     "ToolProviderError",
+    "ToolRateLimitError",
     "ToolSizeLimitError",
     "ToolTimeoutError",
     "ToolValidationError",
