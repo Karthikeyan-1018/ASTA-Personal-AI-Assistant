@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -394,6 +394,22 @@ async def chat(
                 "your request."
             )
         ) from error
+
+
+@router.options("/stream")
+async def chat_stream_options():
+    """Handle preflight/OPTIONS requests on the streaming endpoint."""
+
+    return Response(
+        status_code=status.HTTP_200_OK,
+        headers={
+            "Allow": "POST, OPTIONS",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": (
+                "Content-Type, X-CSRF-Token, Accept, Authorization, Idempotency-Key"
+            ),
+        },
+    )
 
 
 @router.post("/stream")

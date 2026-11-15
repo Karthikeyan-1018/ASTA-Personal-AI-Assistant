@@ -161,6 +161,8 @@ if settings.cors_origins:
             "X-CSRF-Token",
             "X-Setup-Token",
             "Idempotency-Key",
+            "Accept",
+            "Authorization",
         ],
         max_age=600,
     )

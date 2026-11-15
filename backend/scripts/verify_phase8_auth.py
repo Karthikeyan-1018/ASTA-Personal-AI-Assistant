@@ -295,11 +295,16 @@ async def main():
                 await session.refresh(throwaway)
                 session_user_ids.append(throwaway.id)
 
-                await _verify_sessions(session, throwaway.id)
+                # Read the id before _verify_sessions(); its rollbacks expire
+                # the ORM instance, so a later attribute access would load
+                # lazily and fail with MissingGreenlet.
+                throwaway_user_id = throwaway.id
+
+                await _verify_sessions(session, throwaway_user_id)
 
                 print(
                     "OK  session lifecycle verified with a throwaway user "
-                    f"{throwaway.id}"
+                    f"{throwaway_user_id}"
                 )
 
         finally:

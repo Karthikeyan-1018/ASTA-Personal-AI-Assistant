@@ -32,6 +32,12 @@ conversation ownership are validated **before** the response starts, so an
 unauthenticated request receives `401` and a foreign conversation receives `404`
 rather than an in-band SSE error.
 
+The web UI treats a `401` from this endpoint as an expired session: it clears
+local auth state and returns to the sign-in screen. The browser must send the
+`asta_session` cookie, so use `credentials: "include"` (the bundled API client
+and SSE client already do) and make sure the frontend origin is listed in
+`CORS_ALLOWED_ORIGINS` with credentials enabled.
+
 The response is `text/event-stream` with `Cache-Control: no-cache` and
 `X-Accel-Buffering: no` (to prevent proxy buffering). Each event is a single
 `data:` line containing JSON:

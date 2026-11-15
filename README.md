@@ -947,11 +947,17 @@ successful login clears the pair's state, and a restart does not reset the
 counter.
 
 Create the owner with the local CLI (`scripts/create_owner.py`) or the one-time
-`POST /api/auth/setup` endpoint guarded by `AUTH_OWNER_SETUP_TOKEN`. For phone
-access, use HTTPS on a private LAN port, restrict Windows Firewall to the Private
+`POST /api/auth/setup` endpoint guarded by `AUTH_OWNER_SETUP_TOKEN`. The web UI
+opens on a sign-in screen and includes a **First-time setup** tab for the
+bootstrap-token flow; any `401` returns you to that screen. For phone access,
+use HTTPS on a private LAN port, restrict Windows Firewall to the Private
 profile and `LocalSubnet`, and keep PostgreSQL and Ollama on loopback only.
 `X-Forwarded-For` is ignored unless the direct peer is listed in
 `AUTH_TRUSTED_PROXIES`.
+
+When the SPA is served over plain loopback HTTP during local development, set
+`AUTH_COOKIE_SECURE=false` so browsers store the session cookie. Leave it at the
+default `true` for HTTPS and any LAN/phone access.
 
 See [docs/authentication_and_lan_security.md](docs/authentication_and_lan_security.md)
 for owner setup, login/logout, session lifecycle, CSRF, LAN/HTTPS configuration,

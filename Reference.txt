@@ -53,3 +53,11 @@ Phase	Name	Priority
 16	External Application Integrations	High
 17	Browser Automation	High
 18	Autonomous AI Agent	Final stage
+
+
+
+To run backend :
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 
+
+to run frontend :
+npm run dev 

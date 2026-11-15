@@ -412,11 +412,11 @@ class Settings:
         ""
     )
 
-    # Comma-separated explicit frontend origins. Empty means no CORS headers
-    # are emitted, which is correct for a same-origin deployment.
+    # Comma-separated explicit frontend origins. Defaults to standard local
+    # development ports (Vite at 5173 and Next/CRA at 3000).
     CORS_ALLOWED_ORIGINS: str = os.getenv(
         "CORS_ALLOWED_ORIGINS",
-        ""
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
     )
 
     # Comma-separated Host header allowlist. Includes loopback and the test

@@ -303,9 +303,9 @@ AUTH_COOKIE_SECURE=false
 
 Never use this for phone access over Wi-Fi.
 
-## Future frontend contract
+## Frontend contract
 
-When a frontend is added:
+The bundled React frontend already implements this contract:
 
 1. Call `POST /api/auth/login` with `credentials: "include"`.
 2. Read the non-HttpOnly `asta_csrf` cookie (available at `Path=/`) and send
@@ -315,6 +315,11 @@ When a frontend is added:
    HttpOnly cookie is the credential.
 4. On `401`, clear local UI state and show the login view.
 5. Serve the frontend from one of `CORS_ALLOWED_ORIGINS` and use HTTPS.
+
+The UI gates the entire app behind a sign-in screen and offers a **First-time
+setup** tab that calls `POST /api/auth/setup` with the `X-Setup-Token` header.
+The SSE client also treats `401` from `POST /api/chat/stream` as an expired
+session and returns the user to the sign-in screen.
 
 ## Security limitations
 
