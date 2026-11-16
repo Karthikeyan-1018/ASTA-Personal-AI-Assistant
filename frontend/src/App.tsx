@@ -60,9 +60,24 @@ const AppShell: React.FC = () => {
 
   useEffect(() => {
     // Hydrate domain state once an authenticated session is confirmed.
+    // Tasks are loaded before reminders because reminder records resolve their
+    // display title from the linked task; reversing this order would briefly
+    // render fallback "Task #<id>" labels.
+    const hydrateTaskDomain = async () => {
+      try {
+        await useTaskStore.getState().fetchTasks();
+      } catch {
+        // Store already preserves the last confirmed data and records the error.
+      }
+      try {
+        await useReminderStore.getState().fetchReminders();
+      } catch {
+        // Store already preserves the last confirmed data and records the error.
+      }
+    };
+
+    void hydrateTaskDomain();
     useChatStore.getState().loadConversations().catch(() => {});
-    useTaskStore.getState().fetchTasks().catch(() => {});
-    useReminderStore.getState().fetchReminders().catch(() => {});
     useMemoryStore.getState().fetchMemories().catch(() => {});
     useToolStore.getState().fetchTools().catch(() => {});
   }, []);

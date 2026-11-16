@@ -4,73 +4,11 @@ import type { ReminderResponse } from '../types/api.types';
 import { remindersApi } from '../services/api/reminders.api';
 import { useTaskStore } from './task.store';
 
-const INITIAL_REMINDERS: ReminderItem[] = [
-  {
-    id: 'rem-1',
-    title: 'Daily ASTA System Diagnostic Snapshot',
-    description: 'Verify CPU thread load, memory usage, and background queue health.',
-    time: '20:00',
-    date: new Date().toISOString().split('T')[0], // Today
-    category: 'System',
-    frequency: 'daily',
-    active: true,
-    completed: false,
-    createdAt: '2026-11-14T08:00:00Z',
-    notificationChannel: 'desktop',
-  },
-  {
-    id: 'rem-2',
-    title: 'Sync pgvector Semantic Embedding Index',
-    description: 'Ensure newly drafted project notes have up-to-date vector representations.',
-    time: '22:30',
-    date: new Date().toISOString().split('T')[0], // Today
-    category: 'Maintenance',
-    frequency: 'daily',
-    active: true,
-    completed: false,
-    createdAt: '2026-11-14T08:30:00Z',
-    notificationChannel: 'desktop',
-  },
-  {
-    id: 'rem-3',
-    title: 'Weekly Knowledge Graph Integrity Check',
-    description: 'Audit semantic memory associations and prune conflicting entity relations.',
-    time: '09:00',
-    date: '2026-11-16', // Upcoming
-    category: 'Workflow',
-    frequency: 'weekly',
-    active: true,
-    completed: false,
-    createdAt: '2026-11-13T10:00:00Z',
-    notificationChannel: 'sound',
-  },
-  {
-    id: 'rem-4',
-    title: 'Review Ollama Model Weights Update',
-    description: 'Check for new quantized checkpoints of DeepSeek and Qwen coder models.',
-    time: '15:00',
-    date: '2026-11-18', // Upcoming
-    category: 'Work',
-    frequency: 'once',
-    active: false,
-    completed: false,
-    createdAt: '2026-11-12T16:00:00Z',
-    notificationChannel: 'desktop',
-  },
-  {
-    id: 'rem-5',
-    title: 'Morning Workspace Sync & Briefing',
-    description: 'Review morning agenda and active desktop co-pilot priorities.',
-    time: '08:30',
-    date: new Date().toISOString().split('T')[0],
-    category: 'Personal',
-    frequency: 'weekdays',
-    active: true,
-    completed: true,
-    createdAt: '2026-11-14T07:00:00Z',
-    notificationChannel: 'desktop',
-  },
-];
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) return err;
+  return fallback;
+}
 
 function mapBackendReminder(r: ReminderResponse): ReminderItem {
   const tasks = useTaskStore.getState().tasks;
@@ -124,7 +62,7 @@ interface ReminderStoreState {
 }
 
 export const useReminderStore = create<ReminderStoreState>((set, get) => ({
-  reminders: INITIAL_REMINDERS,
+  reminders: [],
   isLoading: false,
   error: null,
   isBackendConnected: false,
@@ -133,25 +71,32 @@ export const useReminderStore = create<ReminderStoreState>((set, get) => ({
     set({ isLoading: true, error: null });
     try {
       const backendReminders = await remindersApi.list();
-      if (Array.isArray(backendReminders)) {
-        if (backendReminders.length > 0) {
-          const mapped = backendReminders.map(mapBackendReminder);
-          set({ reminders: mapped, isBackendConnected: true, isLoading: false });
-        } else {
-          set({ isBackendConnected: true, isLoading: false });
-        }
-      }
-    } catch (err: any) {
-      // Backend not yet populated or offline; keep local samples
+      const mapped = Array.isArray(backendReminders)
+        ? backendReminders.map(mapBackendReminder)
+        : [];
+      // A successful empty response is authoritative: clear any previously
+      // displayed records instead of falling back to stale or mock data.
+      set({
+        reminders: mapped,
+        isBackendConnected: true,
+        isLoading: false,
+        error: null,
+      });
+    } catch (err: unknown) {
+      // Keep the last confirmed reminder list intact when the request fails.
       set({
         isBackendConnected: false,
         isLoading: false,
-        error: err?.message || 'Could not connect to reminders service',
+        error: getErrorMessage(
+          err,
+          'Could not load reminders. Showing the last confirmed data.'
+        ),
       });
     }
   },
 
   addReminder: async (data) => {
+    const previousReminders = get().reminders;
     const tempId = `rem-${Date.now()}`;
     const optimisticReminder: ReminderItem = {
       ...data,
@@ -162,6 +107,7 @@ export const useReminderStore = create<ReminderStoreState>((set, get) => ({
 
     set((state) => ({
       reminders: [optimisticReminder, ...state.reminders],
+      error: null,
     }));
 
     try {
@@ -171,34 +117,44 @@ export const useReminderStore = create<ReminderStoreState>((set, get) => ({
         tasks.find((t) => t.backendId !== undefined) ||
         tasks[0];
 
-      if (targetTask?.backendId) {
-        const remindAtIso = `${data.date}T${data.time}:00Z`;
-        const res = await remindersApi.create(targetTask.backendId, {
-          remind_at: remindAtIso,
-        });
-
-        set((state) => ({
-          reminders: state.reminders.map((r) =>
-            r.id === tempId
-              ? {
-                  ...r,
-                  id: `rem-backend-${res.id}`,
-                  backendId: res.id,
-                  taskId: res.task_id,
-                }
-              : r
-          ),
-        }));
+      if (!targetTask?.backendId) {
+        throw new Error('No saved task is available to attach this reminder to.');
       }
-    } catch {
-      // Keep optimistic entry on error
+
+      const remindAtIso = `${data.date}T${data.time}:00Z`;
+      const res = await remindersApi.create(targetTask.backendId, {
+        remind_at: remindAtIso,
+      });
+
+      set((state) => ({
+        reminders: state.reminders.map((r) =>
+          r.id === tempId
+            ? {
+                ...r,
+                id: `rem-backend-${res.id}`,
+                backendId: res.id,
+                taskId: res.task_id,
+              }
+            : r
+        ),
+        error: null,
+      }));
+    } catch (err: unknown) {
+      // The optimistic entry was never confirmed by the server, so remove it
+      // and restore the last confirmed list.
+      set({
+        reminders: previousReminders,
+        error: getErrorMessage(err, 'Reminder could not be created. No changes were saved.'),
+      });
     }
   },
 
   updateReminder: async (id, updates) => {
+    const previousReminders = get().reminders;
     const current = get().reminders.find((r) => r.id === id);
     set((state) => ({
       reminders: state.reminders.map((r) => (r.id === id ? { ...r, ...updates } : r)),
+      error: null,
     }));
 
     if (current?.backendId && (updates.date || updates.time)) {
@@ -209,24 +165,39 @@ export const useReminderStore = create<ReminderStoreState>((set, get) => ({
         await remindersApi.reschedule(current.backendId, {
           remind_at: remindAtIso,
         });
-      } catch {
-        // Keep updated state
+      } catch (err: unknown) {
+        set({
+          reminders: previousReminders,
+          error: getErrorMessage(
+            err,
+            'Reminder could not be rescheduled. Previous values were restored.'
+          ),
+        });
       }
     }
   },
 
   deleteReminder: async (id) => {
+    const previousReminders = get().reminders;
     const target = get().reminders.find((r) => r.id === id);
+
+    if (!target?.backendId) {
+      set({ error: 'This reminder is not confirmed by the server yet. It was not deleted.' });
+      return;
+    }
+
     set((state) => ({
       reminders: state.reminders.filter((r) => r.id !== id),
+      error: null,
     }));
 
-    if (target?.backendId) {
-      try {
-        await remindersApi.delete(target.backendId);
-      } catch {
-        // Handled
-      }
+    try {
+      await remindersApi.delete(target.backendId);
+    } catch (err: unknown) {
+      set({
+        reminders: previousReminders,
+        error: getErrorMessage(err, 'Reminder could not be deleted. It was restored.'),
+      });
     }
   },
 
@@ -234,26 +205,37 @@ export const useReminderStore = create<ReminderStoreState>((set, get) => ({
     const target = get().reminders.find((r) => r.id === id);
     if (!target) return;
 
+    const previousReminders = get().reminders;
+    if (!target.backendId) {
+      set({ error: 'This reminder is not confirmed by the server yet. It was not changed.' });
+      return;
+    }
+
     const nextActive = !target.active;
     set((state) => ({
       reminders: state.reminders.map((r) =>
         r.id === id ? { ...r, active: nextActive } : r
       ),
+      error: null,
     }));
 
-    if (target.backendId) {
-      try {
-        if (!nextActive) {
-          await remindersApi.cancel(target.backendId);
-        } else {
-          const remindAtIso = `${target.date}T${target.time}:00Z`;
-          await remindersApi.reschedule(target.backendId, {
-            remind_at: remindAtIso,
-          });
-        }
-      } catch {
-        // Handled
+    try {
+      if (!nextActive) {
+        await remindersApi.cancel(target.backendId);
+      } else {
+        const remindAtIso = `${target.date}T${target.time}:00Z`;
+        await remindersApi.reschedule(target.backendId, {
+          remind_at: remindAtIso,
+        });
       }
+    } catch (err: unknown) {
+      set({
+        reminders: previousReminders,
+        error: getErrorMessage(
+          err,
+          'Reminder status could not be changed. It was restored.'
+        ),
+      });
     }
   },
 

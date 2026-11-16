@@ -11,6 +11,9 @@ import {
   Volume2,
   X,
   Sparkles,
+  AlertTriangle,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { useReminderStore } from '../stores/reminder.store';
 import { useUIStore } from '../stores/ui.store';
@@ -22,6 +25,9 @@ function getTodayDateString(): string {
 
 export const Reminders: React.FC = () => {
   const reminders = useReminderStore((s) => s.reminders);
+  const isLoading = useReminderStore((s) => s.isLoading);
+  const error = useReminderStore((s) => s.error);
+  const fetchReminders = useReminderStore((s) => s.fetchReminders);
   const addReminder = useReminderStore((s) => s.addReminder);
   const updateReminder = useReminderStore((s) => s.updateReminder);
   const deleteReminder = useReminderStore((s) => s.deleteReminder);
@@ -136,6 +142,36 @@ export const Reminders: React.FC = () => {
         </button>
       </div>
 
+      {/* Data reliability banner: never replace confirmed data with mock data */}
+      {error && (
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+            <div>
+              <p className="text-xs font-semibold text-rose-200">Reminder service error</p>
+              <p className="mt-0.5 text-[11px] text-rose-200/80">{error}</p>
+              <p className="mt-1 text-[10px] text-rose-200/60">
+                Last confirmed reminder data is preserved until a refresh succeeds.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void fetchReminders();
+            }}
+            disabled={isLoading}
+            className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
+
       {/* Notification Preferences Bar */}
       <div className="flex flex-col gap-4 rounded-2xl border border-slate-800/80 bg-slate-900/30 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
@@ -202,15 +238,26 @@ export const Reminders: React.FC = () => {
       </div>
 
       {/* Reminders List */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {filteredReminders.length === 0 ? (
-          <div className="col-span-full rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-center">
-            <Bell className="mx-auto h-12 w-12 text-slate-600" />
-            <p className="mt-3 text-sm font-semibold text-slate-300">No reminders in this view</p>
-            <p className="mt-1 text-xs text-slate-500">
-              Create a new reminder to stay on top of routines and maintenance tasks.
-            </p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" aria-busy={isLoading}>
+        {isLoading && reminders.length === 0 ? (
+          <div className="col-span-full flex items-center justify-center gap-2 rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-xs text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+            <span>Loading reminders…</span>
           </div>
+        ) : filteredReminders.length === 0 ? (
+          error ? null : (
+            <div className="col-span-full rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-center">
+              <Bell className="mx-auto h-12 w-12 text-slate-600" />
+              <p className="mt-3 text-sm font-semibold text-slate-300">
+                {reminders.length === 0 ? 'No reminders yet' : 'No reminders in this view'}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {reminders.length === 0
+                  ? 'Create a reminder to stay on top of routines and maintenance tasks.'
+                  : 'Try another tab or create a new reminder.'}
+              </p>
+            </div>
+          )
         ) : (
           filteredReminders.map((r) => (
             <div

@@ -47,6 +47,7 @@ function mapFrontendPriority(p: TaskPriority): BackendTaskPriority {
 function mapBackendTaskToItem(t: TaskResponse): TaskItem {
   return {
     id: String(t.id),
+    backendId: t.id,
     title: t.title,
     description: t.description || undefined,
     category: mapBackendCategory(t.category),
@@ -54,62 +55,22 @@ function mapBackendTaskToItem(t: TaskResponse): TaskItem {
     status: (t.status === 'cancelled' ? 'pending' : t.status) as TaskStatus,
     completed: t.is_completed,
     dueDate: t.due_date || undefined,
+    dueTime: t.due_time || undefined,
     createdAt: t.created_at,
     completedAt: t.completed_at || undefined,
   };
 }
 
-const INITIAL_TASKS: TaskItem[] = [
-  {
-    id: 'task-1',
-    title: 'Audit filesystem tool execution sandbox boundaries',
-    description: 'Ensure path traversal validation prevents reading outside c:\\Asta without explicit confirmation.',
-    category: 'Security',
-    priority: 'critical',
-    status: 'in_progress',
-    completed: false,
-    dueDate: '2026-11-15',
-    createdAt: '2026-11-14T09:00:00Z',
-    tags: ['sandbox', 'security'],
-  },
-  {
-    id: 'task-2',
-    title: 'Index local documentation for semantic hybrid retrieval',
-    description: 'Generate 384-dim embeddings using all-MiniLM-L6-v2 for docs and architecture guides.',
-    category: 'Memory',
-    priority: 'high',
-    status: 'pending',
-    completed: false,
-    dueDate: '2026-11-16',
-    createdAt: '2026-11-14T10:15:00Z',
-    tags: ['pgvector', 'rag'],
-  },
-  {
-    id: 'task-3',
-    title: 'Calibrate LLM hybrid routing latency thresholds',
-    description: 'Switch between Groq Llama-3.3-70b (remote) and Ollama DeepSeek (local) based on ping and privacy tag.',
-    category: 'System',
-    priority: 'medium',
-    status: 'pending',
-    completed: false,
-    dueDate: '2026-11-17',
-    createdAt: '2026-11-14T11:30:00Z',
-    tags: ['routing', 'groq'],
-  },
-  {
-    id: 'task-4',
-    title: 'Validate Phase 14 desktop UI dark mode contrast',
-    description: 'Ensure WCAG AA contrast ratio across all Obsidian cards and code syntax panels.',
-    category: 'Development',
-    priority: 'medium',
-    status: 'completed',
-    completed: true,
-    dueDate: '2026-11-14',
-    createdAt: '2026-11-13T14:00:00Z',
-    completedAt: '2026-11-14T18:00:00Z',
-    tags: ['ui', 'accessibility'],
-  },
-];
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) return err;
+  return fallback;
+}
+
+function toBackendTaskId(id: string): number | null {
+  const parsed = Number(id);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
 
 interface TaskStoreState {
   tasks: TaskItem[];
@@ -127,7 +88,7 @@ interface TaskStoreState {
 }
 
 export const useTaskStore = create<TaskStoreState>((set, get) => ({
-  tasks: INITIAL_TASKS,
+  tasks: [],
   filter: {
     status: 'all',
     priority: 'all',
@@ -138,19 +99,24 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
   error: null,
 
   fetchTasks: async () => {
+    set({ isLoading: true, error: null });
     try {
-      set({ isLoading: true, error: null });
       const res = await tasksApi.list({ limit: 100 });
-      if (res && res.tasks) {
-        const mapped = res.tasks.map(mapBackendTaskToItem);
-        if (mapped.length > 0) {
-          set({ tasks: mapped, isLoading: false });
-          return;
-        }
-      }
-      set({ isLoading: false });
-    } catch (err: any) {
-      set({ error: err.message || 'Failed to fetch tasks from backend', isLoading: false });
+      const mapped = Array.isArray(res?.tasks)
+        ? res.tasks.map(mapBackendTaskToItem)
+        : [];
+      // A successful empty response is authoritative: clear any previously
+      // displayed records instead of falling back to stale or mock data.
+      set({ tasks: mapped, isLoading: false, error: null });
+    } catch (err: unknown) {
+      // Keep the last confirmed task list intact when the request fails.
+      set({
+        isLoading: false,
+        error: getErrorMessage(
+          err,
+          'Could not load tasks. Showing the last confirmed data.'
+        ),
+      });
     }
   },
 
@@ -163,6 +129,7 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     }),
 
   addTask: async (taskData) => {
+    const previousTasks = get().tasks;
     const tempId = `task-${Date.now()}`;
     const newTask: TaskItem = {
       ...taskData,
@@ -172,7 +139,7 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     };
 
     // Optimistic update
-    set((state) => ({ tasks: [newTask, ...state.tasks] }));
+    set((state) => ({ tasks: [newTask, ...state.tasks], error: null }));
 
     try {
       const created = await tasksApi.create({
@@ -184,16 +151,24 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
         due_date: taskData.dueDate || null,
       });
 
-      // Replace temporary ID with real backend ID
+      // Replace temporary ID with the server-confirmed task.
       set((state) => ({
         tasks: state.tasks.map((t) => (t.id === tempId ? mapBackendTaskToItem(created) : t)),
+        error: null,
       }));
-    } catch {
-      // Local optimistic item remains functional
+    } catch (err: unknown) {
+      // The optimistic entry was never confirmed by the server, so remove it
+      // and restore the last confirmed list.
+      set({
+        tasks: previousTasks,
+        error: getErrorMessage(err, 'Task could not be created. No changes were saved.'),
+      });
     }
   },
 
   updateTask: async (id, updates) => {
+    const previousTasks = get().tasks;
+
     // Optimistic update
     set((state) => ({
       tasks: state.tasks.map((t) => {
@@ -210,41 +185,72 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
       }),
     }));
 
-    const numId = Number(id);
-    if (!isNaN(numId) && numId > 0) {
-      try {
-        await tasksApi.update(numId, {
-          title: updates.title,
-          description: updates.description,
-          category: updates.category ? mapFrontendCategory(updates.category) : undefined,
-          priority: updates.priority ? mapFrontendPriority(updates.priority) : undefined,
-          status: updates.status ? (updates.status as BackendTaskStatus) : undefined,
-          due_date: updates.dueDate,
-        });
-      } catch {
-        // Optimistic state kept
-      }
+    const numId = toBackendTaskId(id);
+    if (numId === null) {
+      set({
+        tasks: previousTasks,
+        error: 'This task is not confirmed by the server yet. No changes were saved.',
+      });
+      return;
+    }
+
+    try {
+      const saved = await tasksApi.update(numId, {
+        title: updates.title,
+        description: updates.description,
+        category: updates.category ? mapFrontendCategory(updates.category) : undefined,
+        priority: updates.priority ? mapFrontendPriority(updates.priority) : undefined,
+        status: updates.status ? (updates.status as BackendTaskStatus) : undefined,
+        due_date: updates.dueDate,
+      });
+
+      // Adopt the server response so the UI never shows unconfirmed values.
+      set((state) => ({
+        tasks: state.tasks.map((t) => (t.id === id ? mapBackendTaskToItem(saved) : t)),
+        error: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        tasks: previousTasks,
+        error: getErrorMessage(err, 'Task could not be updated. Previous values were restored.'),
+      });
     }
   },
 
   deleteTask: async (id) => {
+    const previousTasks = get().tasks;
+    const numId = toBackendTaskId(id);
+
+    if (numId === null) {
+      set({ error: 'This task is not confirmed by the server yet. It was not deleted.' });
+      return;
+    }
+
     set((state) => ({
       tasks: state.tasks.filter((t) => t.id !== id),
+      error: null,
     }));
 
-    const numId = Number(id);
-    if (!isNaN(numId) && numId > 0) {
-      try {
-        await tasksApi.delete(numId);
-      } catch {
-        // Optimistic state kept
-      }
+    try {
+      await tasksApi.delete(numId);
+    } catch (err: unknown) {
+      set({
+        tasks: previousTasks,
+        error: getErrorMessage(err, 'Task could not be deleted. It was restored.'),
+      });
     }
   },
 
   toggleTaskCompleted: async (id) => {
     const target = get().tasks.find((t) => t.id === id);
     if (!target) return;
+
+    const previousTasks = get().tasks;
+    const numId = toBackendTaskId(id);
+    if (numId === null) {
+      set({ error: 'This task is not confirmed by the server yet. It was not changed.' });
+      return;
+    }
 
     const nextCompleted = !target.completed;
 
@@ -258,19 +264,23 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
           completedAt: nextCompleted ? new Date().toISOString() : undefined,
         };
       }),
+      error: null,
     }));
 
-    const numId = Number(id);
-    if (!isNaN(numId) && numId > 0) {
-      try {
-        if (nextCompleted) {
-          await tasksApi.complete(numId);
-        } else {
-          await tasksApi.reopen(numId);
-        }
-      } catch {
-        // Optimistic state kept
-      }
+    try {
+      const saved = nextCompleted
+        ? await tasksApi.complete(numId)
+        : await tasksApi.reopen(numId);
+
+      set((state) => ({
+        tasks: state.tasks.map((t) => (t.id === id ? mapBackendTaskToItem(saved) : t)),
+        error: null,
+      }));
+    } catch (err: unknown) {
+      set({
+        tasks: previousTasks,
+        error: getErrorMessage(err, 'Task status could not be changed. It was restored.'),
+      });
     }
   },
 

@@ -10,12 +10,18 @@ import {
   X,
   CheckSquare,
   BarChart3,
+  AlertTriangle,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { useTaskStore } from '../stores/task.store';
 import type { TaskItem, TaskPriority, TaskCategory, TaskStatus } from '../types/task.types';
 
 export const Tasks: React.FC = () => {
   const tasks = useTaskStore((s) => s.tasks);
+  const isLoading = useTaskStore((s) => s.isLoading);
+  const error = useTaskStore((s) => s.error);
+  const fetchTasks = useTaskStore((s) => s.fetchTasks);
   const filter = useTaskStore((s) => s.filter);
   const setFilter = useTaskStore((s) => s.setFilter);
   const resetFilter = useTaskStore((s) => s.resetFilter);
@@ -130,6 +136,36 @@ export const Tasks: React.FC = () => {
           <span>New Task</span>
         </button>
       </div>
+
+      {/* Data reliability banner: never replace confirmed data with mock data */}
+      {error && (
+        <div
+          role="alert"
+          className="flex flex-col gap-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+            <div>
+              <p className="text-xs font-semibold text-rose-200">Task service error</p>
+              <p className="mt-0.5 text-[11px] text-rose-200/80">{error}</p>
+              <p className="mt-1 text-[10px] text-rose-200/60">
+                Last confirmed task data is preserved until a refresh succeeds.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void fetchTasks();
+            }}
+            disabled={isLoading}
+            className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
 
       {/* Task Statistics Bar */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 sm:gap-4">
@@ -257,23 +293,34 @@ export const Tasks: React.FC = () => {
       </div>
 
       {/* Task Cards List */}
-      <div className="space-y-3">
-        {filteredTasks.length === 0 ? (
-          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-center">
-            <CheckSquare className="mx-auto h-12 w-12 text-slate-600" />
-            <p className="mt-3 text-sm font-semibold text-slate-300">No tasks found</p>
-            <p className="mt-1 text-xs text-slate-500">
-              Try adjusting your search query or create a new objective.
-            </p>
-            <button
-              type="button"
-              onClick={openCreateModal}
-              className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Create Task</span>
-            </button>
+      <div className="space-y-3" aria-busy={isLoading}>
+        {isLoading && tasks.length === 0 ? (
+          <div className="flex items-center justify-center gap-2 rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-xs text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+            <span>Loading tasks…</span>
           </div>
+        ) : filteredTasks.length === 0 ? (
+          error ? null : (
+            <div className="rounded-2xl border border-slate-800/80 bg-slate-900/30 p-12 text-center">
+              <CheckSquare className="mx-auto h-12 w-12 text-slate-600" />
+              <p className="mt-3 text-sm font-semibold text-slate-300">
+                {tasks.length === 0 ? 'No tasks yet' : 'No tasks match this view'}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {tasks.length === 0
+                  ? 'Create your first task to start tracking work.'
+                  : 'Try adjusting your search query or filters.'}
+              </p>
+              <button
+                type="button"
+                onClick={openCreateModal}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>Create Task</span>
+              </button>
+            </div>
+          )
         ) : (
           filteredTasks.map((task) => (
             <div

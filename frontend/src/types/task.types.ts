@@ -12,6 +12,7 @@ export interface TaskItem {
   status: TaskStatus;
   completed: boolean;
   dueDate?: string; // YYYY-MM-DD
+  dueTime?: string; // HH:MM[:SS]
   createdAt: string;
   completedAt?: string;
   tags?: string[];
