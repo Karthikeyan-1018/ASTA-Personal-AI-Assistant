@@ -1,401 +1,923 @@
 import { create } from 'zustand';
 import chatSSEClient from '../services/streaming/sse-client';
 import conversationsApi from '../services/api/conversations.api';
-import type { ConversationMessage } from '../types/chat.types';
+import type { ChatRole, ConversationMessage } from '../types/chat.types';
 import type { ConversationDetail } from '../types/conversation.types';
-import type { SSEDoneData, SSEErrorData, SSEStartData } from '../types/api.types';
+import type {
+  ConversationResponse,
+  MessageResponse,
+  SSEDoneData,
+  SSEErrorData,
+  SSEStartData,
+} from '../types/api.types';
 
-const INITIAL_CONVERSATIONS: ConversationDetail[] = [
-  {
-    id: 'conv-1',
-    title: 'Workspace Initial Setup & Briefing',
-    createdAt: '2026-11-14T09:00:00Z',
-    updatedAt: '2026-11-14T09:05:00Z',
-    messageCount: 2,
-    previewSnippet: 'Welcome to ASTA Desktop. Core workspace modules are online...',
-    isPinned: true,
-    messages: [
-      {
-        id: 'msg-1',
-        role: 'assistant',
-        content:
-          'Welcome to ASTA Desktop. Core workspace modules are initialized and operational. Real-time SSE streaming pipeline is connected to `/api/chat/stream`. How can I assist you today?',
-        timestamp: '09:00',
-        model: 'ASTA-Core v1',
-        provider: 'backend',
-      },
-    ],
-  },
-];
+export type ConversationListStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export interface SendMessageResult {
+  ok: boolean;
+  conversationId: string | null;
+  error: string | null;
+}
 
 interface ChatStoreState {
   conversations: ConversationDetail[];
   activeConversationId: string;
+  conversationsStatus: ConversationListStatus;
+  conversationsError: string | null;
+  conversationsLoaded: boolean;
   isStreaming: boolean;
+  isSending: boolean;
   streamingMessageId: string | null;
   activeModel: string;
-  error: string | null;
+  streamError: string | null;
+  creatingConversation: boolean;
+  pendingConversationIds: string[];
   loadConversations: () => Promise<void>;
+  loadMessages: (id: string, force?: boolean) => Promise<void>;
+  retryActiveConversation: () => Promise<void>;
+  ensureConversation: () => Promise<string | null>;
   setActiveModel: (model: string) => void;
   setActiveConversationId: (id: string) => void;
-  createNewConversation: () => Promise<string>;
-  deleteConversation: (id: string) => Promise<void>;
-  renameConversation: (id: string, newTitle: string) => Promise<void>;
-  sendMessage: (content: string, isPrivate?: boolean) => Promise<void>;
+  createNewConversation: () => Promise<string | null>;
+  startNewConversationWithMessage: (content: string, isPrivate?: boolean) => Promise<SendMessageResult>;
+  deleteConversation: (id: string) => Promise<boolean>;
+  renameConversation: (id: string, newTitle: string) => Promise<boolean>;
+  sendMessage: (content: string, isPrivate?: boolean) => Promise<SendMessageResult>;
   stopGeneration: () => void;
-  regenerateLastMessage: () => Promise<void>;
-  clearActiveConversation: () => void;
+  clearConversationsError: () => void;
+  clearStreamError: () => void;
+}
+
+// Conversation creation is deduplicated across concurrent senders so a fresh
+// account can never create two backend conversations for one user action.
+let creationPromise: Promise<string | null> | null = null;
+
+// Only one send/stream may own the UI at a time. A monotonically increasing
+// attempt id lets late SSE callbacks detect that they are stale.
+let sendAttempt = 0;
+let abortedSendAttempt = -1;
+
+let localMessageCounter = 0;
+
+function nextLocalMessageId(prefix: string): string {
+  localMessageCounter += 1;
+  return `${prefix}-${Date.now()}-${localMessageCounter}`;
+}
+
+function toBackendId(value: string): number | null {
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function readableError(error: unknown, fallback: string): string {
+  if (error instanceof Error) {
+    const message = error.message.trim();
+    if (message) return message;
+  }
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  return fallback;
+}
+
+function formatClock(value?: string): string {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function mapBackendMessage(message: MessageResponse): ConversationMessage {
+  return {
+    id: String(message.id),
+    role: message.role as ChatRole,
+    content: message.content,
+    timestamp: formatClock(message.created_at),
+    provider: message.provider || undefined,
+    model: message.model || undefined,
+    isPrivate: message.is_private,
+    status: 'complete',
+  };
+}
+
+function conversationFromResponse(
+  conversation: ConversationResponse,
+  messagesLoaded = false
+): ConversationDetail {
+  return {
+    id: String(conversation.id),
+    title: conversation.title,
+    createdAt: conversation.created_at,
+    updatedAt: conversation.updated_at,
+    messages: [],
+    messageCount: messagesLoaded ? 0 : undefined,
+    previewSnippet: undefined,
+    messagesLoaded,
+    messagesUnavailable: false,
+    messagesLoading: false,
+    messagesError: null,
+  };
+}
+
+function updateMessage(
+  conversations: ConversationDetail[],
+  messageId: string,
+  updater: (message: ConversationMessage) => ConversationMessage
+): ConversationDetail[] {
+  return conversations.map((conversation) => {
+    if (!conversation.messages.some((message) => message.id === messageId)) {
+      return conversation;
+    }
+    return {
+      ...conversation,
+      messages: conversation.messages.map((message) =>
+        message.id === messageId ? updater(message) : message
+      ),
+    };
+  });
+}
+
+function findMessage(
+  conversations: ConversationDetail[],
+  messageId: string
+): ConversationMessage | undefined {
+  for (const conversation of conversations) {
+    const match = conversation.messages.find((message) => message.id === messageId);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function mergeMessages(
+  primary: ConversationMessage[],
+  secondary: ConversationMessage[]
+): ConversationMessage[] {
+  const seen = new Set(primary.map((message) => message.id));
+  return [...primary, ...secondary.filter((message) => !seen.has(message.id))];
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => {
+  const performCreateConversation = async (): Promise<string | null> => {
+    set({ creatingConversation: true, conversationsError: null });
+
+    try {
+      const created = await conversationsApi.create({ title: 'New Conversation' });
+
+      if (!created || typeof created.id !== 'number') {
+        throw new Error('The backend did not return a valid conversation id.');
+      }
+
+      const id = String(created.id);
+      // The backend guarantees a freshly created conversation has no messages,
+      // so an empty confirmed message list is accurate here.
+      const entry = conversationFromResponse(created, true);
+
+      set((state) => ({
+        conversations: [entry, ...state.conversations.filter((c) => c.id !== id)],
+        activeConversationId: id,
+      }));
+
+      return id;
+    } catch (error) {
+      set({
+        conversationsError: readableError(error, 'The conversation could not be created.'),
+      });
+      return null;
+    } finally {
+      set({ creatingConversation: false });
+      creationPromise = null;
+    }
+  };
+
   return {
-    conversations: INITIAL_CONVERSATIONS,
-    activeConversationId: 'conv-1',
+    conversations: [],
+    activeConversationId: '',
+    conversationsStatus: 'idle',
+    conversationsError: null,
+    conversationsLoaded: false,
     isStreaming: false,
+    isSending: false,
     streamingMessageId: null,
-    activeModel: 'ASTA-Core v1 (Hybrid)',
-    error: null,
+    activeModel: '',
+    streamError: null,
+    creatingConversation: false,
+    pendingConversationIds: [],
 
     setActiveModel: (model) => set({ activeModel: model }),
 
     setActiveConversationId: (id) => {
+      if (!get().conversations.some((conversation) => conversation.id === id)) {
+        return;
+      }
       if (get().isStreaming) {
         get().stopGeneration();
       }
-      set({ activeConversationId: id, error: null });
+      set({ activeConversationId: id, streamError: null });
     },
 
     loadConversations: async () => {
+      if (get().conversationsStatus === 'loading') return;
+
+      set({ conversationsStatus: 'loading', conversationsError: null });
+
       try {
-        const backendConvs = await conversationsApi.list();
-        if (backendConvs && backendConvs.length > 0) {
-          const mapped: ConversationDetail[] = await Promise.all(
-            backendConvs.map(async (c) => {
-              let messages: ConversationMessage[] = [];
-              try {
-                const msgRes = await conversationsApi.listMessages(c.id, 50, 0);
-                messages = msgRes.messages.map((m) => ({
-                  id: String(m.id),
-                  role: m.role as any,
-                  content: m.content,
-                  timestamp: new Date(m.created_at).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  }),
-                  model: m.model || undefined,
-                  provider: m.provider || undefined,
-                  isPrivate: m.is_private,
-                }));
-              } catch {
-                // Keep empty if message load fails
-              }
+        const backendConversations = await conversationsApi.list();
+        const previous = new Map(
+          get().conversations.map((conversation) => [conversation.id, conversation])
+        );
 
-              const lastMsg = messages[messages.length - 1];
-              return {
-                id: String(c.id),
-                title: c.title,
-                createdAt: c.created_at,
-                updatedAt: c.updated_at,
-                messageCount: messages.length,
-                previewSnippet: lastMsg ? lastMsg.content.slice(0, 60) : 'Empty thread',
-                messages,
-              };
-            })
-          );
+        const mapped = backendConversations.map((conversation) => {
+          const id = String(conversation.id);
+          const cached = previous.get(id);
 
-          set({
-            conversations: mapped,
-            activeConversationId: mapped[0].id,
-          });
-        }
-      } catch {
-        // Fallback to local default conversations if backend is not yet populated
+          if (!cached) return conversationFromResponse(conversation);
+
+          // Refresh metadata from the backend without dropping messages that
+          // were already confirmed for this conversation.
+          return {
+            ...cached,
+            title: conversation.title,
+            createdAt: conversation.created_at,
+            updatedAt: conversation.updated_at,
+          };
+        });
+
+        set((state) => ({
+          conversations: mapped,
+          activeConversationId: mapped.some(
+            (conversation) => conversation.id === state.activeConversationId
+          )
+            ? state.activeConversationId
+            : mapped[0]?.id ?? '',
+          conversationsStatus: 'ready',
+          conversationsLoaded: true,
+          conversationsError: null,
+        }));
+      } catch (error) {
+        // Preserve the last confirmed list. The UI shows the error and Retry.
+        set({
+          conversationsStatus: 'error',
+          conversationsError: readableError(
+            error,
+            'Conversations could not be loaded.'
+          ),
+        });
       }
+    },
+
+    loadMessages: async (id, force = false) => {
+      const backendId = toBackendId(id);
+      if (backendId === null) return;
+
+      const conversation = get().conversations.find((c) => c.id === id);
+      if (!conversation) return;
+      if (conversation.messagesLoading) return;
+      if (!force && conversation.messagesLoaded) return;
+
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === id
+            ? { ...c, messagesLoading: true, messagesError: null }
+            : c
+        ),
+      }));
+
+      try {
+        const response = await conversationsApi.listMessages(backendId, 50, 0);
+        const messages = response.messages.map(mapBackendMessage);
+        const lastMessage = messages[messages.length - 1];
+
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === id
+              ? {
+                  ...c,
+                  messages,
+                  messagesLoaded: true,
+                  messagesLoading: false,
+                  messagesUnavailable: false,
+                  messagesError: null,
+                  messageCount:
+                    typeof response.total === 'number' ? response.total : messages.length,
+                  previewSnippet: lastMessage
+                    ? lastMessage.content.slice(0, 60)
+                    : undefined,
+                }
+              : c
+          ),
+        }));
+      } catch (error) {
+        // Keep any previously confirmed messages on screen and surface the
+        // failure instead of pretending the conversation is empty.
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === id
+              ? {
+                  ...c,
+                  messagesLoading: false,
+                  messagesUnavailable: true,
+                  messagesError: readableError(
+                    error,
+                    'Messages could not be loaded.'
+                  ),
+                }
+              : c
+          ),
+        }));
+      }
+    },
+
+    retryActiveConversation: async () => {
+      const id = get().activeConversationId;
+      if (!id || get().isStreaming || get().isSending) return;
+      set({ streamError: null });
+      await get().loadMessages(id, true);
     },
 
     createNewConversation: async () => {
       if (get().isStreaming) {
         get().stopGeneration();
       }
+      if (creationPromise) {
+        return creationPromise;
+      }
+      creationPromise = performCreateConversation();
+      return creationPromise;
+    },
 
-      let backendId: string | null = null;
-      try {
-        const created = await conversationsApi.create({ title: 'New Conversation' });
-        backendId = String(created.id);
-      } catch {
-        // Fallback to local ID
-        backendId = `conv-${Date.now()}`;
+    ensureConversation: async () => {
+      const { activeConversationId, conversations } = get();
+
+      if (
+        toBackendId(activeConversationId) !== null &&
+        conversations.some((conversation) => conversation.id === activeConversationId)
+      ) {
+        return activeConversationId;
       }
 
-      const newConv: ConversationDetail = {
-        id: backendId,
-        title: 'New Conversation',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        messageCount: 1,
-        previewSnippet: 'How can ASTA assist you today?',
-        messages: [
-          {
-            id: `msg-${Date.now()}`,
-            role: 'assistant',
-            content: 'Hello! I am ASTA, your personal AI assistant. How can I help you today?',
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            model: get().activeModel,
-          },
-        ],
-      };
+      return get().createNewConversation();
+    },
 
-      set((state) => ({
-        conversations: [newConv, ...state.conversations],
-        activeConversationId: backendId,
-      }));
+    startNewConversationWithMessage: async (content, isPrivate = false) => {
+      const trimmed = content.trim();
+      if (!trimmed) {
+        return { ok: false, conversationId: null, error: null };
+      }
+      if (get().isStreaming || get().isSending) {
+        return {
+          ok: false,
+          conversationId: get().activeConversationId || null,
+          error: null,
+        };
+      }
 
-      return backendId;
+      const id = await get().createNewConversation();
+      if (!id) {
+        return {
+          ok: false,
+          conversationId: null,
+          error:
+            get().conversationsError ??
+            'The conversation could not be created.',
+        };
+      }
+
+      return get().sendMessage(trimmed, isPrivate);
     },
 
     deleteConversation: async (id) => {
-      const numId = Number(id);
-      if (!isNaN(numId) && numId > 0) {
-        try {
-          await conversationsApi.delete(numId);
-        } catch {
-          // Handled
-        }
-      }
+      const backendId = toBackendId(id);
 
-      const remaining = get().conversations.filter((c) => c.id !== id);
-      if (remaining.length === 0) {
-        const freshId = `conv-${Date.now()}`;
+      if (backendId === null) {
         set({
-          conversations: [
-            {
-              id: freshId,
-              title: 'New Conversation',
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              messageCount: 0,
-              previewSnippet: 'Empty conversation',
-              messages: [],
-            },
-          ],
-          activeConversationId: freshId,
+          conversationsError:
+            'This conversation is not backed by the server and cannot be deleted.',
         });
-        return;
+        return false;
       }
 
-      set({
-        conversations: remaining,
-        activeConversationId:
-          get().activeConversationId === id ? remaining[0].id : get().activeConversationId,
-      });
+      if (get().pendingConversationIds.includes(id)) return false;
+
+      set((state) => ({
+        pendingConversationIds: [...state.pendingConversationIds, id],
+        conversationsError: null,
+      }));
+
+      try {
+        await conversationsApi.delete(backendId);
+
+        set((state) => {
+          const remaining = state.conversations.filter(
+            (conversation) => conversation.id !== id
+          );
+
+          return {
+            conversations: remaining,
+            activeConversationId:
+              state.activeConversationId === id
+                ? remaining[0]?.id ?? ''
+                : state.activeConversationId,
+            pendingConversationIds: state.pendingConversationIds.filter(
+              (pendingId) => pendingId !== id
+            ),
+            conversationsError: null,
+          };
+        });
+
+        return true;
+      } catch (error) {
+        set((state) => ({
+          pendingConversationIds: state.pendingConversationIds.filter(
+            (pendingId) => pendingId !== id
+          ),
+          conversationsError: readableError(
+            error,
+            'The conversation could not be deleted.'
+          ),
+        }));
+        return false;
+      }
     },
 
     renameConversation: async (id, newTitle) => {
-      const trimmed = newTitle.trim() || 'Untitled Session';
-      const numId = Number(id);
-      if (!isNaN(numId) && numId > 0) {
-        try {
-          await conversationsApi.updateTitle(numId, trimmed);
-        } catch {
-          // Handled
-        }
+      const backendId = toBackendId(id);
+
+      if (backendId === null) {
+        set({
+          conversationsError:
+            'This conversation is not backed by the server and cannot be renamed.',
+        });
+        return false;
       }
 
+      const trimmed = newTitle.trim();
+      if (!trimmed) {
+        set({ conversationsError: 'A conversation title cannot be empty.' });
+        return false;
+      }
+
+      if (get().pendingConversationIds.includes(id)) return false;
+
       set((state) => ({
-        conversations: state.conversations.map((c) =>
-          c.id === id ? { ...c, title: trimmed } : c
-        ),
+        pendingConversationIds: [...state.pendingConversationIds, id],
+        conversationsError: null,
       }));
+
+      try {
+        const updated = await conversationsApi.updateTitle(backendId, trimmed);
+        const confirmedTitle =
+          typeof updated?.title === 'string' && updated.title.trim()
+            ? updated.title.trim()
+            : trimmed;
+
+        set((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === id
+              ? { ...conversation, title: confirmedTitle }
+              : conversation
+          ),
+          pendingConversationIds: state.pendingConversationIds.filter(
+            (pendingId) => pendingId !== id
+          ),
+          conversationsError: null,
+        }));
+
+        return true;
+      } catch (error) {
+        set((state) => ({
+          pendingConversationIds: state.pendingConversationIds.filter(
+            (pendingId) => pendingId !== id
+          ),
+          conversationsError: readableError(
+            error,
+            'The conversation could not be renamed.'
+          ),
+        }));
+        return false;
+      }
     },
 
-    clearActiveConversation: () => {
-      chatSSEClient.cancel();
-      const activeId = get().activeConversationId;
-      set((state) => ({
-        isStreaming: false,
-        streamingMessageId: null,
-        conversations: state.conversations.map((c) =>
-          c.id === activeId
-            ? { ...c, messages: [], messageCount: 0, previewSnippet: 'Cleared' }
-            : c
-        ),
-      }));
+    sendMessage: async (content, isPrivate = false) => {
+      const trimmed = content.trim();
+
+      if (!trimmed) {
+        return {
+          ok: false,
+          conversationId: get().activeConversationId || null,
+          error: null,
+        };
+      }
+
+      if (get().isStreaming || get().isSending) {
+        return {
+          ok: false,
+          conversationId: get().activeConversationId || null,
+          error: null,
+        };
+      }
+
+      const attempt = ++sendAttempt;
+      set({ isSending: true, streamError: null });
+
+      let conversationId: string | null = get().activeConversationId || null;
+      let assistantMessage: ConversationMessage | null = null;
+
+      try {
+        const ensured = await get().ensureConversation();
+
+        if (ensured === null) {
+          return {
+            ok: false,
+            conversationId: null,
+            error:
+              get().conversationsError ??
+              'The conversation could not be created.',
+          };
+        }
+
+        conversationId = ensured;
+
+        // The user may have stopped during conversation creation.
+        if (abortedSendAttempt === attempt) {
+          return { ok: false, conversationId, error: null };
+        }
+
+        const knownConversation = get().conversations.find(
+          (conversation) => conversation.id === conversationId
+        );
+
+        if (!knownConversation) {
+          const message = 'The conversation is no longer available.';
+          set({ streamError: message });
+          return { ok: false, conversationId, error: message };
+        }
+
+        // Load the thread before appending if it has not been confirmed yet.
+        // A failed load is surfaced, but does not prevent a new message.
+        if (
+          !knownConversation.messagesLoaded &&
+          !knownConversation.messagesUnavailable &&
+          !knownConversation.messagesLoading
+        ) {
+          await get().loadMessages(conversationId);
+        }
+
+        if (abortedSendAttempt === attempt) {
+          return { ok: false, conversationId, error: null };
+        }
+
+        const target = get().conversations.find(
+          (conversation) => conversation.id === conversationId
+        );
+
+        if (!target) {
+          const message = 'The conversation is no longer available.';
+          set({ streamError: message });
+          return { ok: false, conversationId, error: message };
+        }
+
+        const timestamp = formatClock();
+        const userMessage: ConversationMessage = {
+          id: nextLocalMessageId('user'),
+          role: 'user',
+          content: trimmed,
+          timestamp,
+          status: 'complete',
+        };
+
+        assistantMessage = {
+          id: nextLocalMessageId('assistant'),
+          role: 'assistant',
+          content: '',
+          timestamp,
+          status: 'streaming',
+        };
+
+        const assistantMessageId = assistantMessage.id;
+        const activeAssistantMessage = assistantMessage;
+        // Mirrors received tokens in case the provisional entry must be rebuilt.
+        let streamedContent = '';
+
+        const adoptConversation = (nextId: string) => {
+          set((state) => {
+            const source = state.conversations.find((conversation) =>
+              conversation.messages.some(
+                (message) => message.id === assistantMessageId
+              )
+            );
+
+            if (!source) {
+              // The provisional entry disappeared (for example a concurrent
+              // list refresh). Rebuild it from the in-flight turn so no
+              // received token is silently discarded.
+              const now = new Date().toISOString();
+              return {
+                activeConversationId: nextId,
+                conversations: [
+                  {
+                    id: nextId,
+                    title: 'New Conversation',
+                    createdAt: now,
+                    updatedAt: now,
+                    messages: [
+                      userMessage,
+                      { ...activeAssistantMessage, content: streamedContent },
+                    ],
+                    messagesLoaded: false,
+                    messagesUnavailable: false,
+                    messagesLoading: false,
+                    messagesError: null,
+                  },
+                  ...state.conversations,
+                ],
+              };
+            }
+
+            if (source.id === nextId) {
+              return { activeConversationId: nextId };
+            }
+
+            const existingTarget = state.conversations.find(
+              (conversation) => conversation.id === nextId
+            );
+
+            if (existingTarget) {
+              return {
+                activeConversationId: nextId,
+                conversations: state.conversations
+                  .filter((conversation) => conversation.id !== source.id)
+                  .map((conversation) =>
+                    conversation.id === nextId
+                      ? {
+                          ...conversation,
+                          messages: mergeMessages(
+                            source.messages,
+                            conversation.messages
+                          ),
+                          messagesLoaded:
+                            Boolean(source.messagesLoaded) ||
+                            Boolean(conversation.messagesLoaded),
+                          messagesUnavailable: false,
+                          messagesLoading: false,
+                          messagesError: null,
+                        }
+                      : conversation
+                  ),
+              };
+            }
+
+            // Adopt the backend-assigned id on the existing entry.
+            return {
+              activeConversationId: nextId,
+              conversations: state.conversations.map((conversation) =>
+                conversation.id === source.id
+                  ? { ...conversation, id: nextId }
+                  : conversation
+              ),
+            };
+          });
+        };
+
+        const isCurrentAttempt = () => attempt === sendAttempt;
+
+        set((state) => ({
+          isSending: false,
+          isStreaming: true,
+          streamingMessageId: assistantMessageId,
+          streamError: null,
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === conversationId
+              ? {
+                  ...conversation,
+                  messages: [
+                    ...conversation.messages,
+                    userMessage,
+                    activeAssistantMessage,
+                  ],
+                  messageCount: undefined,
+                  previewSnippet: trimmed,
+                  updatedAt: new Date().toISOString(),
+                }
+              : conversation
+          ),
+        }));
+
+        let sawDone = false;
+        let sawError = false;
+
+        await chatSSEClient.streamChat(
+          {
+            message: trimmed,
+            private: isPrivate,
+            conversation_id: toBackendId(conversationId),
+          },
+          {
+            onStart: (data: SSEStartData) => {
+              if (!isCurrentAttempt()) return;
+
+              if (data.model) {
+                set({ activeModel: data.model });
+              }
+
+              if (data.model || data.provider) {
+                set((state) => ({
+                  conversations: updateMessage(
+                    state.conversations,
+                    assistantMessageId,
+                    (message) => ({
+                      ...message,
+                      model: data.model ?? message.model,
+                      provider: data.provider ?? message.provider,
+                    })
+                  ),
+                }));
+              }
+
+              if (data.conversation_id !== undefined && data.conversation_id !== null) {
+                const nextId = String(data.conversation_id);
+                if (nextId !== conversationId) {
+                  conversationId = nextId;
+                  adoptConversation(nextId);
+                }
+              }
+            },
+
+            onDelta: (textChunk: string) => {
+              if (!isCurrentAttempt() || !textChunk) return;
+
+              streamedContent += textChunk;
+
+              set((state) => ({
+                conversations: updateMessage(
+                  state.conversations,
+                  assistantMessageId,
+                  (message) => ({
+                    ...message,
+                    content: message.content + textChunk,
+                  })
+                ),
+              }));
+            },
+
+            onDone: (data: SSEDoneData) => {
+              if (!isCurrentAttempt()) return;
+              sawDone = true;
+
+              if (data.conversation_id !== undefined && data.conversation_id !== null) {
+                const nextId = String(data.conversation_id);
+                if (nextId !== conversationId) {
+                  conversationId = nextId;
+                  adoptConversation(nextId);
+                }
+              }
+
+              if (data.model) {
+                set({ activeModel: data.model });
+              }
+
+              const content =
+                findMessage(get().conversations, assistantMessageId)?.content ?? '';
+
+              set((state) => ({
+                isStreaming: false,
+                streamingMessageId: null,
+                conversations: updateMessage(
+                  state.conversations,
+                  assistantMessageId,
+                  (message) => ({
+                    ...message,
+                    status: content ? 'complete' : 'incomplete',
+                    provider: data.provider ?? message.provider,
+                    model: data.model ?? message.model,
+                  })
+                ),
+              }));
+
+              if (!content) {
+                set({ streamError: 'The assistant returned an empty response.' });
+              }
+            },
+
+            onError: (errorData: SSEErrorData) => {
+              if (!isCurrentAttempt()) return;
+              sawError = true;
+
+              const content =
+                findMessage(get().conversations, assistantMessageId)?.content ?? '';
+
+              set((state) => ({
+                isStreaming: false,
+                streamingMessageId: null,
+                streamError:
+                  errorData.message || 'The response could not be completed.',
+                conversations: updateMessage(
+                  state.conversations,
+                  assistantMessageId,
+                  (message) => ({
+                    ...message,
+                    status: content ? 'incomplete' : 'failed',
+                  })
+                ),
+              }));
+            },
+          }
+        );
+
+        if (!isCurrentAttempt()) {
+          return { ok: false, conversationId, error: get().streamError };
+        }
+
+        if (!sawDone && !sawError) {
+          if (abortedSendAttempt === attempt || !get().isStreaming) {
+            // stopGeneration already marked the interrupted message.
+            set({ isStreaming: false, streamingMessageId: null });
+            return { ok: false, conversationId, error: null };
+          }
+
+          const content =
+            findMessage(get().conversations, assistantMessageId)?.content ?? '';
+          const terminationMessage =
+            'The response ended unexpectedly before it completed.';
+
+          set((state) => ({
+            isStreaming: false,
+            streamingMessageId: null,
+            streamError: terminationMessage,
+            conversations: updateMessage(
+              state.conversations,
+              assistantMessageId,
+              (message) => ({
+                ...message,
+                status: content ? 'incomplete' : 'failed',
+              })
+            ),
+          }));
+
+          return { ok: false, conversationId, error: terminationMessage };
+        }
+
+        return {
+          ok: sawDone && !sawError,
+          conversationId,
+          error: get().streamError,
+        };
+      } catch (error) {
+        const message = readableError(error, 'The message could not be sent.');
+
+        if (attempt === sendAttempt) {
+          set((state) => ({
+            isStreaming: false,
+            streamingMessageId: null,
+            streamError: message,
+            conversations: assistantMessage
+              ? updateMessage(
+                  state.conversations,
+                  assistantMessage.id,
+                  (current) => ({ ...current, status: 'failed' })
+                )
+              : state.conversations,
+          }));
+        }
+
+        return { ok: false, conversationId, error: message };
+      } finally {
+        if (attempt === sendAttempt && get().isSending) {
+          set({ isSending: false });
+        }
+      }
     },
 
     stopGeneration: () => {
+      abortedSendAttempt = sendAttempt;
+
+      const messageId = get().streamingMessageId;
+
+      if (messageId) {
+        const content =
+          findMessage(get().conversations, messageId)?.content ?? '';
+
+        set((state) => ({
+          isStreaming: false,
+          streamingMessageId: null,
+          conversations: updateMessage(
+            state.conversations,
+            messageId,
+            (message) => ({
+              ...message,
+              // Keep any received text, but make it clear that this answer was
+              // interrupted rather than completed by the provider.
+              status: content ? 'incomplete' : 'failed',
+            })
+          ),
+        }));
+      } else {
+        set({ isStreaming: false, streamingMessageId: null });
+      }
+
+      set({ isSending: false, streamError: null });
       chatSSEClient.cancel();
-      set({ isStreaming: false, streamingMessageId: null });
     },
 
-    sendMessage: async (content: string, isPrivate = false) => {
-      const trimmed = content.trim();
-      if (!trimmed || get().isStreaming) return;
-
-      const activeId = get().activeConversationId;
-      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const userMsgId = `user-${Date.now()}`;
-      const assistantMsgId = `assistant-${Date.now() + 1}`;
-
-      const userMessage: ConversationMessage = {
-        id: userMsgId,
-        role: 'user',
-        content: trimmed,
-        timestamp: now,
-      };
-
-      const pendingAssistantMessage: ConversationMessage = {
-        id: assistantMsgId,
-        role: 'assistant',
-        content: '',
-        timestamp: now,
-        model: get().activeModel,
-      };
-
-      const conv = get().conversations.find((c) => c.id === activeId);
-      const isFirstUserMessage = conv?.messages.filter((m) => m.role === 'user').length === 0;
-      const derivedTitle = isFirstUserMessage
-        ? trimmed.length > 28
-          ? trimmed.slice(0, 28) + '...'
-          : trimmed
-        : conv?.title || 'Conversation';
-
-      // Update UI state with user message and pending assistant message
-      set((state) => ({
-        isStreaming: true,
-        streamingMessageId: assistantMsgId,
-        error: null,
-        conversations: state.conversations.map((c) =>
-          c.id === activeId
-            ? {
-                ...c,
-                title: derivedTitle,
-                updatedAt: new Date().toISOString(),
-                previewSnippet: trimmed,
-                messages: [...c.messages, userMessage, pendingAssistantMessage],
-                messageCount: c.messages.length + 2,
-              }
-            : c
-        ),
-      }));
-
-      const numConvId = Number(activeId);
-      const backendConversationId = !isNaN(numConvId) && numConvId > 0 ? numConvId : null;
-
-      let hasReceivedTokens = false;
-
-      await chatSSEClient.streamChat(
-        {
-          message: trimmed,
-          private: isPrivate,
-          conversation_id: backendConversationId,
-        },
-        {
-          onStart: (data: SSEStartData) => {
-            if (data.conversation_id && String(data.conversation_id) !== activeId) {
-              const newIdStr = String(data.conversation_id);
-              set((state) => ({
-                activeConversationId: newIdStr,
-                conversations: state.conversations.map((c) =>
-                  c.id === activeId ? { ...c, id: newIdStr } : c
-                ),
-              }));
-            }
-            if (data.model) {
-              set({ activeModel: data.model });
-            }
-          },
-
-          onDelta: (textChunk: string) => {
-            hasReceivedTokens = true;
-            set((state) => ({
-              conversations: state.conversations.map((c) => {
-                if (c.id !== get().activeConversationId && c.id !== activeId) return c;
-                return {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === assistantMsgId ? { ...m, content: m.content + textChunk } : m
-                  ),
-                };
-              }),
-            }));
-          },
-
-          onDone: (data: SSEDoneData) => {
-            set((state) => ({
-              isStreaming: false,
-              streamingMessageId: null,
-              conversations: state.conversations.map((c) => {
-                if (c.id !== get().activeConversationId && c.id !== activeId) return c;
-                return {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === assistantMsgId
-                      ? {
-                          ...m,
-                          provider: data.provider,
-                          model: data.model || m.model,
-                        }
-                      : m
-                  ),
-                };
-              }),
-            }));
-          },
-
-          onError: async (errorData: SSEErrorData) => {
-            set({ isStreaming: false, streamingMessageId: null, error: errorData.message });
-
-            // If no tokens were streamed (e.g. backend offline or unauthenticated),
-            // provide a graceful fallback message so the UI is informative and helpful
-            if (!hasReceivedTokens) {
-              const isUnauthorized = errorData.code === 'http_401';
-
-              const fallbackNotice = isUnauthorized
-                ? `🔒 **Session expired**\n\n` +
-                  `*Your ASTA session is no longer valid. You have been returned to the sign-in screen — please sign in again.*`
-                : `⚠️ **Backend notice:** ${errorData.message}\n\n` +
-                  `*The request to \`/api/chat/stream\` could not complete (${errorData.code}). ` +
-                  `Ensure FastAPI is running at \`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}\` ` +
-                  `and your session is authenticated.*`;
-
-              set((state) => ({
-                conversations: state.conversations.map((c) => {
-                  if (c.id !== get().activeConversationId && c.id !== activeId) return c;
-                  return {
-                    ...c,
-                    messages: c.messages.map((m) =>
-                      m.id === assistantMsgId ? { ...m, content: fallbackNotice } : m
-                    ),
-                  };
-                }),
-              }));
-            }
-          },
-        }
-      );
-    },
-
-    regenerateLastMessage: async () => {
-      if (get().isStreaming) return;
-      const activeId = get().activeConversationId;
-      const conv = get().conversations.find((c) => c.id === activeId);
-      if (!conv || conv.messages.length < 2) return;
-
-      const lastUserMsg = [...conv.messages].reverse().find((m) => m.role === 'user');
-      if (!lastUserMsg) return;
-
-      set((state) => ({
-        conversations: state.conversations.map((c) => {
-          if (c.id !== activeId) return c;
-          const messages = c.messages.filter(
-            (_, idx) => idx !== c.messages.length - 1 || c.messages[idx].role === 'user'
-          );
-          return { ...c, messages };
-        }),
-      }));
-
-      await get().sendMessage(lastUserMsg.content);
-    },
+    clearConversationsError: () => set({ conversationsError: null }),
+    clearStreamError: () => set({ streamError: null }),
   };
 });
 

@@ -1,482 +1,953 @@
 import { create } from 'zustand';
+import { toolsApi } from '../services/api/tools.api';
 import type {
-  ToolCategory,
+  ToolConfirmation,
   ToolDefinition,
   ToolExecutionLog,
   ToolParameterDef,
+  ToolParameterType,
 } from '../types/tool.types';
 import type {
+  EmergencyStopResponse,
+  ToolConfirmationResponse,
   ToolDefinitionResponse,
   ToolExecutionResponse,
+  ToolMetricsResponse,
+  ToolResultResponse,
 } from '../types/api.types';
-import { toolsApi } from '../services/api/tools.api';
 
-const INITIAL_TOOLS: ToolDefinition[] = [
-  {
-    id: 'tool-sysinfo',
-    backendName: 'system_info',
-    name: 'System Information Inspector',
-    category: 'Information',
-    description: 'Inspect OS kernel version, CPU topology, available memory, and system uptime.',
-    permission: 'read_only',
-    confirmationRequired: false,
-    enabled: true,
-    parameters: [
-      { name: 'includeNetwork', type: 'boolean', description: 'Query network adapter telemetry', required: false, default: true },
-    ],
-    sampleOutput: JSON.stringify({ os: 'Windows 11 Pro 64-bit', cpu: '16 Cores @ 3.4GHz', ram_gb: 32, uptime: '74h 12m' }, null, 2),
-  },
-  {
-    id: 'tool-fs-read',
-    backendName: 'read_file',
-    name: 'Safe Filesystem Reader',
-    category: 'Filesystem',
-    description: 'Read file contents, inspect code repositories, and stream markdown documents.',
-    permission: 'read_only',
-    confirmationRequired: false,
-    enabled: true,
-    parameters: [
-      { name: 'path', type: 'path', description: 'Relative or absolute project file path', required: true, default: 'frontend/package.json' },
-    ],
-    sampleOutput: '{"name": "asta-desktop", "version": "1.4.0", "private": true}',
-  },
-  {
-    id: 'tool-fs-write',
-    backendName: 'write_file',
-    name: 'Filesystem Writer & Patch',
-    category: 'Filesystem',
-    description: 'Write, append, or patch files inside audited workspace paths.',
-    permission: 'elevated',
-    confirmationRequired: true,
-    enabled: true,
-    parameters: [
-      { name: 'path', type: 'path', description: 'Target destination file', required: true },
-      { name: 'content', type: 'string', description: 'File content to write', required: true },
-    ],
-    sampleOutput: 'File written successfully: 1,428 bytes synced to disk.',
-  },
-  {
-    id: 'tool-process-list',
-    backendName: 'list_processes',
-    name: 'Process Table Inspector',
-    category: 'Process',
-    description: 'List active processes, CPU utilization, thread count, and parent process IDs.',
-    permission: 'read_only',
-    confirmationRequired: false,
-    enabled: true,
-    parameters: [
-      { name: 'filter', type: 'string', description: 'Process name filter (optional)', required: false, default: 'python' },
-    ],
-    sampleOutput: JSON.stringify([
-      { pid: 14220, name: 'python.exe', cpu_pct: 1.8, memory_mb: 280, cmd: 'uvicorn app.main:app' },
-      { pid: 8940, name: 'node.exe', cpu_pct: 0.4, memory_mb: 165, cmd: 'vite' },
-    ], null, 2),
-  },
-  {
-    id: 'tool-app-launch',
-    backendName: 'launch_app',
-    name: 'Desktop App Launcher',
-    category: 'Application',
-    description: 'Launch approved local desktop applications, editors, and terminal consoles.',
-    permission: 'elevated',
-    confirmationRequired: true,
-    enabled: true,
-    parameters: [
-      { name: 'appName', type: 'string', description: 'Application alias or executable', required: true, default: 'code' },
-      { name: 'workingDir', type: 'path', description: 'Initial directory path', required: false, default: 'C:\\Asta' },
-    ],
-    sampleOutput: 'Application launched successfully: process spawned with PID 18402.',
-  },
-  {
-    id: 'tool-desktop-notify',
-    backendName: 'desktop_notify',
-    name: 'Desktop Notification Dispatcher',
-    category: 'Desktop',
-    description: 'Trigger system notification toasts with sound cues and action links.',
-    permission: 'read_only',
-    confirmationRequired: false,
-    enabled: true,
-    parameters: [
-      { name: 'title', type: 'string', description: 'Notification title', required: true, default: 'ASTA Alert' },
-      { name: 'message', type: 'string', description: 'Notification message body', required: true, default: 'Task execution completed' },
-    ],
-    sampleOutput: 'Notification delivered to Windows notification center.',
-  },
-  {
-    id: 'tool-bg-indexer',
-    backendName: 'vector_indexer',
-    name: 'Vector Store Background Indexer',
-    category: 'Background Tasks',
-    description: 'Run background embedding re-indexing worker over modified documents.',
-    permission: 'elevated',
-    confirmationRequired: false,
-    enabled: true,
-    parameters: [
-      { name: 'batchSize', type: 'number', description: 'Batch embedding size', required: false, default: 32 },
-    ],
-    sampleOutput: 'Embedding indexer started: 48 documents queued for vectorization.',
-  },
-];
+export type ToolSectionStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-const INITIAL_LOGS: ToolExecutionLog[] = [
-  {
-    id: 'log-1',
-    toolId: 'tool-sysinfo',
-    toolName: 'System Information Inspector',
-    executedAt: '2026-11-14T18:30:10Z',
-    durationMs: 45,
-    status: 'success',
-    parameters: { includeNetwork: true },
-    output: JSON.stringify({ os: 'Windows 11 Pro 64-bit', cpu: '16 Cores @ 3.4GHz', ram_gb: 32, uptime: '74h 12m' }, null, 2),
-  },
-  {
-    id: 'log-2',
-    toolId: 'tool-fs-read',
-    toolName: 'Safe Filesystem Reader',
-    executedAt: '2026-11-14T17:45:22Z',
-    durationMs: 18,
-    status: 'success',
-    parameters: { path: 'frontend/package.json' },
-    output: '{"name": "frontend", "version": "0.0.0", "dependencies": {...}}',
-  },
-  {
-    id: 'log-3',
-    toolId: 'tool-fs-write',
-    toolName: 'Filesystem Writer & Patch',
-    executedAt: '2026-11-14T16:10:00Z',
-    durationMs: 120,
-    status: 'success',
-    parameters: { path: 'frontend/src/index.css', content: '@import "tailwindcss";' },
-    output: 'File written successfully: 840 bytes synced to disk.',
-    confirmedBy: 'Owner',
-  },
-];
-
-function sanitizeToolCategory(cat: string): ToolCategory {
-  const lower = cat.toLowerCase();
-  if (lower.includes('info')) return 'Information';
-  if (lower.includes('file')) return 'Filesystem';
-  if (lower.includes('proc')) return 'Process';
-  if (lower.includes('app')) return 'Application';
-  if (lower.includes('desk')) return 'Desktop';
-  return 'Background Tasks';
-}
-
-function parseParameters(schema: Record<string, any>): ToolParameterDef[] {
-  if (!schema || typeof schema !== 'object') return [];
-  const props = schema.properties || {};
-  const requiredList: string[] = Array.isArray(schema.required) ? schema.required : [];
-  return Object.entries(props).map(([propName, propDef]: [string, any]) => {
-    let paramType: 'string' | 'number' | 'boolean' | 'path' = 'string';
-    if (propDef.type === 'number' || propDef.type === 'integer') paramType = 'number';
-    else if (propDef.type === 'boolean') paramType = 'boolean';
-    else if (propName.toLowerCase().includes('path') || propDef.format === 'path') paramType = 'path';
-
-    return {
-      name: propName,
-      type: paramType,
-      description: propDef.description || `Parameter ${propName}`,
-      required: requiredList.includes(propName),
-      default: propDef.default,
-    };
-  });
-}
-
-function mapBackendTool(bt: ToolDefinitionResponse): ToolDefinition {
-  const params = parseParameters(bt.parameters);
-  return {
-    id: `tool-${bt.name}`,
-    backendName: bt.name,
-    name: bt.name.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
-    category: sanitizeToolCategory(bt.category),
-    description: bt.description,
-    permission: bt.requires_confirmation ? 'elevated' : 'read_only',
-    confirmationRequired: bt.requires_confirmation,
-    enabled: bt.enabled,
-    parameters: params.length > 0 ? params : [
-      { name: 'payload', type: 'string', description: 'Execution payload arguments', required: false },
-    ],
-    sampleOutput: 'Audited execution output from ASTA core sandbox pipeline.',
-  };
-}
-
-function mapBackendExecution(be: ToolExecutionResponse): ToolExecutionLog {
-  let mappedStatus: 'success' | 'failed' | 'cancelled' | 'pending_approval' = 'success';
-  if (be.confirmation_status === 'pending') {
-    mappedStatus = 'pending_approval';
-  } else if (!be.success) {
-    mappedStatus = be.confirmation_status === 'rejected' ? 'cancelled' : 'failed';
-  }
-
-  return {
-    id: `log-backend-${be.id}`,
-    executionId: be.id,
-    toolId: `tool-${be.tool_name}`,
-    toolName: be.tool_name.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
-    executedAt: be.started_at || be.created_at || new Date().toISOString(),
-    durationMs: be.duration_ms || 35,
-    status: mappedStatus,
-    parameters: be.argument_keys ? Object.fromEntries(be.argument_keys.map((k: string) => [k, '***'])) : {},
-    output: be.success ? 'Execution completed via audited backend pipeline.' : undefined,
-    errorMessage: !be.success ? (be.error_code || 'Execution error') : undefined,
-  };
+export interface ToolExecutionResult {
+  ok: boolean;
+  record: ToolExecutionLog | null;
+  error: string | null;
 }
 
 interface ToolStoreState {
   tools: ToolDefinition[];
+  toolsStatus: ToolSectionStatus;
+  toolsError: string | null;
+  toolsLoaded: boolean;
+
   executionLogs: ToolExecutionLog[];
-  pendingConfirmation: ToolExecutionLog | null;
-  isLoading: boolean;
-  error: string | null;
-  isBackendConnected: boolean;
-  emergencyStopActive: boolean;
-  fetchTools: () => Promise<void>;
-  toggleToolEnabled: (id: string) => void;
-  executeToolSimulated: (toolId: string, params: Record<string, unknown>) => Promise<ToolExecutionLog>;
-  approvePendingConfirmation: () => Promise<void>;
-  rejectPendingConfirmation: () => Promise<void>;
-  toggleEmergencyStop: () => Promise<void>;
-  clearLogs: () => void;
+  historyStatus: ToolSectionStatus;
+  historyError: string | null;
+  historyLoaded: boolean;
+  historyTotal: number;
+  historyViewCleared: boolean;
+
+  pendingConfirmations: ToolConfirmation[];
+  confirmationsStatus: ToolSectionStatus;
+  confirmationsError: string | null;
+  confirmationsLoaded: boolean;
+  confirmationPendingIds: number[];
+
+  emergencyStop: EmergencyStopResponse | null;
+  emergencyStopStatus: ToolSectionStatus;
+  emergencyStopError: string | null;
+  emergencyStopPending: boolean;
+
+  metrics: ToolMetricsResponse | null;
+  metricsStatus: ToolSectionStatus;
+  metricsError: string | null;
+
+  executionPending: boolean;
+  executionError: string | null;
+  lastActionResult: ToolExecutionLog | null;
+  actionNotice: string | null;
+
+  loadToolWorkspace: () => Promise<void>;
+  fetchTools: () => Promise<boolean>;
+  fetchHistory: (silent?: boolean) => Promise<boolean>;
+  fetchExecutionDetail: (
+    executionId: number
+  ) => Promise<ToolExecutionLog | null>;
+  fetchConfirmations: (silent?: boolean) => Promise<boolean>;
+  fetchEmergencyStop: (silent?: boolean) => Promise<boolean>;
+  fetchMetrics: (silent?: boolean) => Promise<boolean>;
+
+  executeTool: (
+    toolId: string,
+    params: Record<string, unknown>
+  ) => Promise<ToolExecutionResult>;
+  approvePendingConfirmation: (confirmationId: number) => Promise<boolean>;
+  rejectPendingConfirmation: (confirmationId: number) => Promise<boolean>;
+  engageEmergencyStop: () => Promise<boolean>;
+  recoverEmergencyStop: (recoveryToken: string) => Promise<boolean>;
+
+  clearHistoryView: () => void;
+  clearToolsError: () => void;
+  clearHistoryError: () => void;
+  clearConfirmationsError: () => void;
+  clearEmergencyStopError: () => void;
+  clearMetricsError: () => void;
+  clearExecutionError: () => void;
+  clearActionNotice: () => void;
 }
 
+let historyInFlight = false;
+let confirmationsInFlight = false;
+let emergencyStopInFlight = false;
+let metricsInFlight = false;
+let localRecordCounter = 0;
+let executionCounter = 0;
+
+function nextIdempotencyKey(toolName: string): string {
+  executionCounter += 1;
+  return `exec-${toolName}-${Date.now()}-${executionCounter}`;
+}
+
+function nextLocalId(prefix: string): string {
+  localRecordCounter += 1;
+  return `${prefix}-${Date.now()}-${localRecordCounter}`;
+}
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  return fallback;
+}
+
+function humanizeToolName(name: string): string {
+  return name
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function normalizeParamType(value: unknown): ToolParameterType {
+  const raw = Array.isArray(value)
+    ? value.find((entry) => typeof entry === 'string' && entry !== 'null')
+    : value;
+
+  if (raw === 'integer' || raw === 'number') return 'number';
+  if (raw === 'boolean') return 'boolean';
+  if (raw === 'object') return 'object';
+  if (raw === 'array') return 'array';
+  return 'string';
+}
+
+interface JsonSchemaProperty {
+  type?: unknown;
+  format?: unknown;
+  description?: unknown;
+  default?: unknown;
+  enum?: unknown;
+  anyOf?: unknown;
+  oneOf?: unknown;
+}
+
+function schemaPropertyDefinition(property: JsonSchemaProperty): JsonSchemaProperty {
+  const union = Array.isArray(property.anyOf)
+    ? property.anyOf
+    : Array.isArray(property.oneOf)
+    ? property.oneOf
+    : null;
+
+  if (!union) return property;
+
+  const nonNull = union.find(
+    (entry) =>
+      entry &&
+      typeof entry === 'object' &&
+      (entry as JsonSchemaProperty).type !== 'null'
+  ) as JsonSchemaProperty | undefined;
+
+  return nonNull ?? property;
+}
+
+/**
+ * Convert the backend JSON parameter schema into display fields. An empty
+ * schema yields an empty list: no payload field is invented.
+ */
+function parseParameters(schema: Record<string, unknown> | null | undefined): ToolParameterDef[] {
+  if (!schema || typeof schema !== 'object') return [];
+
+  const properties = schema.properties;
+  if (!properties || typeof properties !== 'object') return [];
+
+  const requiredList = Array.isArray(schema.required)
+    ? schema.required.filter((value): value is string => typeof value === 'string')
+    : [];
+
+  return Object.entries(properties as Record<string, JsonSchemaProperty>).map(
+    ([name, rawProperty]) => {
+      const property = schemaPropertyDefinition(rawProperty ?? {});
+      const enumValues = Array.isArray(property.enum)
+        ? property.enum.filter(
+            (value): value is string | number | boolean =>
+              typeof value === 'string' ||
+              typeof value === 'number' ||
+              typeof value === 'boolean'
+          )
+        : undefined;
+
+      const definition: ToolParameterDef = {
+        name,
+        type:
+          property.format === 'path' ? 'path' : normalizeParamType(property.type),
+        description:
+          typeof property.description === 'string' ? property.description : '',
+        required: requiredList.includes(name),
+      };
+
+      if (property.default !== undefined) {
+        if (
+          typeof property.default === 'string' ||
+          typeof property.default === 'number' ||
+          typeof property.default === 'boolean'
+        ) {
+          definition.default = property.default;
+        }
+      }
+
+      if (enumValues && enumValues.length > 0) {
+        definition.enumValues = enumValues;
+      }
+
+      return definition;
+    }
+  );
+}
+
+function mapBackendTool(tool: ToolDefinitionResponse): ToolDefinition {
+  return {
+    id: `tool-${tool.name}`,
+    name: humanizeToolName(tool.name),
+    backendName: tool.name,
+    category: tool.category,
+    description: tool.description,
+    confirmationRequired: tool.requires_confirmation,
+    enabled: tool.enabled,
+    allowedInPrivate: tool.allowed_in_private,
+    parameters: parseParameters(tool.parameters),
+    outputSchema:
+      tool.output_schema && typeof tool.output_schema === 'object'
+        ? tool.output_schema
+        : {},
+  };
+}
+
+function mapBackendExecution(execution: ToolExecutionResponse): ToolExecutionLog {
+  return {
+    id: `execution-${execution.id}`,
+    executionId: execution.id,
+    toolName: execution.tool_name,
+    category: execution.category,
+    executedAt:
+      execution.started_at || execution.completed_at || execution.created_at,
+    startedAt: execution.started_at ?? null,
+    completedAt: execution.completed_at ?? null,
+    durationMs:
+      typeof execution.duration_ms === 'number' ? execution.duration_ms : null,
+    status: execution.status,
+    lifecycleStatus: execution.lifecycle_status,
+    success: execution.success === true,
+    confirmationStatus: execution.confirmation_status,
+    argumentKeys: Array.isArray(execution.argument_keys)
+      ? execution.argument_keys
+      : [],
+    // Execution history is metadata-only. Raw output is never retained.
+    output: null,
+    outputAvailable: false,
+    errorCode: execution.error_code ?? null,
+    errorCategory: execution.error_category ?? null,
+    provider: execution.provider ?? null,
+    resultBytes:
+      typeof execution.result_bytes === 'number'
+        ? execution.result_bytes
+        : null,
+    truncated: execution.truncated === true,
+    retryCount: execution.retry_count ?? 0,
+    conversationId: execution.conversation_id ?? null,
+  };
+}
+
+function mapConfirmation(confirmation: ToolConfirmationResponse): ToolConfirmation {
+  return {
+    id: confirmation.id,
+    toolName: confirmation.tool_name,
+    category: confirmation.category,
+    status: confirmation.status,
+    argumentsPreview: confirmation.arguments_preview ?? '',
+    createdAt: confirmation.created_at,
+    expiresAt: confirmation.expires_at ?? '',
+    resolvedAt: confirmation.resolved_at ?? null,
+    conversationId: confirmation.conversation_id ?? null,
+    executionId: confirmation.execution_id ?? null,
+    isExpired: confirmation.is_expired === true,
+  };
+}
+
+function presentOutput(data: unknown): { output: string | null; outputAvailable: boolean } {
+  if (data === null || data === undefined) {
+    return { output: null, outputAvailable: false };
+  }
+
+  if (typeof data === 'string') {
+    return data.length > 0
+      ? { output: data, outputAvailable: true }
+      : { output: null, outputAvailable: false };
+  }
+
+  try {
+    return { output: JSON.stringify(data, null, 2), outputAvailable: true };
+  } catch {
+    return { output: String(data), outputAvailable: true };
+  }
+}
+
+function mapResultRecord(
+  result: ToolResultResponse,
+  options: {
+    toolName?: string;
+    category?: string | null;
+    confirmationId?: number;
+    confirmationStatus?: string | null;
+    executedAt?: string;
+    argumentKeys?: string[];
+  } = {}
+): ToolExecutionLog {
+  const { output, outputAvailable } = presentOutput(result.data);
+
+  return {
+    id:
+      typeof result.execution_id === 'number'
+        ? `execution-${result.execution_id}`
+        : nextLocalId('result'),
+    executionId: result.execution_id ?? null,
+    toolName: options.toolName ?? result.tool ?? 'Tool',
+    category: options.category ?? null,
+    executedAt: options.executedAt ?? new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    durationMs:
+      typeof result.duration_ms === 'number' ? result.duration_ms : null,
+    status:
+      result.status ||
+      (result.success ? 'success' : result.confirmation_required ? 'confirmation_required' : 'error'),
+    lifecycleStatus: null,
+    success: result.success === true,
+    confirmationStatus:
+      result.confirmation_status ?? options.confirmationStatus ?? null,
+    argumentKeys: options.argumentKeys ?? [],
+    output,
+    outputAvailable,
+    errorMessage: result.error_message ?? null,
+    errorCode: result.error_code ?? null,
+    errorCategory: result.error_category ?? null,
+    provider: result.provider ?? null,
+    resultBytes:
+      typeof result.result_bytes === 'number' ? result.result_bytes : null,
+    truncated: result.truncated === true,
+    retryCount: result.retry_count ?? 0,
+    confirmationId: result.confirmation_id ?? options.confirmationId,
+  };
+}
+
+function mapConfirmationActionRecord(
+  confirmation: ToolConfirmationResponse,
+  result: ToolResultResponse | null | undefined
+): ToolExecutionLog {
+  if (result) {
+    return mapResultRecord(result, {
+      toolName: confirmation.tool_name,
+      category: confirmation.category,
+      confirmationId: confirmation.id,
+      confirmationStatus: confirmation.status,
+      executedAt: confirmation.resolved_at ?? confirmation.created_at,
+    });
+  }
+
+  // The server resolved the confirmation but did not return a result payload.
+  return {
+    id: confirmation.execution_id
+      ? `execution-${confirmation.execution_id}`
+      : nextLocalId('confirmation'),
+    executionId: confirmation.execution_id ?? null,
+    toolName: confirmation.tool_name,
+    category: confirmation.category,
+    executedAt: confirmation.resolved_at ?? confirmation.created_at,
+    startedAt: null,
+    completedAt: null,
+    durationMs: null,
+    status: confirmation.status,
+    lifecycleStatus: null,
+    success: confirmation.status === 'executed',
+    confirmationStatus: confirmation.status,
+    argumentKeys: [],
+    output: null,
+    outputAvailable: false,
+    confirmationId: confirmation.id,
+  };
+}
+
+const EMPTY_SECTIONS = {
+  tools: [] as ToolDefinition[],
+  toolsStatus: 'idle' as ToolSectionStatus,
+  toolsError: null as string | null,
+  toolsLoaded: false,
+  executionLogs: [] as ToolExecutionLog[],
+  historyStatus: 'idle' as ToolSectionStatus,
+  historyError: null as string | null,
+  historyLoaded: false,
+  historyTotal: 0,
+  historyViewCleared: false,
+  pendingConfirmations: [] as ToolConfirmation[],
+  confirmationsStatus: 'idle' as ToolSectionStatus,
+  confirmationsError: null as string | null,
+  confirmationsLoaded: false,
+  confirmationPendingIds: [] as number[],
+  emergencyStop: null as EmergencyStopResponse | null,
+  emergencyStopStatus: 'idle' as ToolSectionStatus,
+  emergencyStopError: null as string | null,
+  emergencyStopPending: false,
+  metrics: null as ToolMetricsResponse | null,
+  metricsStatus: 'idle' as ToolSectionStatus,
+  metricsError: null as string | null,
+  executionPending: false,
+  executionError: null as string | null,
+  lastActionResult: null as ToolExecutionLog | null,
+  actionNotice: null as string | null,
+};
+
 export const useToolStore = create<ToolStoreState>((set, get) => ({
-  tools: INITIAL_TOOLS,
-  executionLogs: INITIAL_LOGS,
-  pendingConfirmation: null,
-  isLoading: false,
-  error: null,
-  isBackendConnected: false,
-  emergencyStopActive: false,
+  ...EMPTY_SECTIONS,
+
+  loadToolWorkspace: async () => {
+    // Each section is independent so one failing API never blocks the others.
+    await Promise.all([
+      get().fetchTools(),
+      get().fetchHistory(),
+      get().fetchConfirmations(),
+      get().fetchEmergencyStop(),
+      get().fetchMetrics(),
+    ]);
+  },
 
   fetchTools: async () => {
-    set({ isLoading: true, error: null });
+    if (get().toolsStatus === 'loading') return false;
+
+    set({ toolsStatus: 'loading', toolsError: null });
+
     try {
-      const data = await toolsApi.list();
-      if (data && Array.isArray(data.tools) && data.tools.length > 0) {
-        const mappedTools = data.tools.map(mapBackendTool);
-        set({ tools: mappedTools, isBackendConnected: true, isLoading: false });
-      } else {
-        set({ isBackendConnected: true, isLoading: false });
+      const response = await toolsApi.list();
+
+      if (!response || !Array.isArray(response.tools)) {
+        throw new Error('The backend did not return a tool catalogue.');
       }
 
-      // Check emergency stop
-      try {
-        const eStop = await toolsApi.getEmergencyStop();
-        if (eStop) {
-          set({ emergencyStopActive: eStop.engaged });
-        }
-      } catch {
-        // Handled
-      }
-
-      // Fetch recent execution history
-      try {
-        const history = await toolsApi.listExecutions({ limit: 20 });
-        if (history && Array.isArray(history.executions) && history.executions.length > 0) {
-          const mappedLogs = history.executions.map(mapBackendExecution);
-          set({ executionLogs: mappedLogs });
-        }
-      } catch {
-        // Handled
-      }
-
-      // Fetch pending confirmations
-      try {
-        const confs = await toolsApi.listConfirmations();
-        if (confs && Array.isArray(confs.confirmations) && confs.confirmations.length > 0) {
-          const firstPending = confs.confirmations.find(
-            (c) => c.status === 'pending' && !c.is_expired
-          );
-          if (firstPending) {
-            const pendingLog: ToolExecutionLog = {
-              id: `log-conf-${firstPending.id}`,
-              confirmationId: firstPending.id,
-              executionId: firstPending.execution_id ?? undefined,
-              toolId: `tool-${firstPending.tool_name}`,
-              toolName: firstPending.tool_name,
-              executedAt: firstPending.created_at,
-              durationMs: 0,
-              status: 'pending_approval',
-              parameters:
-                typeof firstPending.arguments_preview === 'object' && firstPending.arguments_preview !== null
-                  ? (firstPending.arguments_preview as Record<string, unknown>)
-                  : { preview: firstPending.arguments_preview || '' },
-            };
-            set({ pendingConfirmation: pendingLog });
-          }
-        }
-      } catch {
-        // Handled
-      }
-    } catch (err: any) {
       set({
-        isLoading: false,
-        isBackendConnected: false,
-        error: err?.message || 'Could not connect to tools service',
+        tools: response.tools.map(mapBackendTool),
+        toolsStatus: 'ready',
+        toolsLoaded: true,
+        toolsError: null,
       });
+      return true;
+    } catch (error) {
+      // Keep the last confirmed catalogue visible on a failed refresh.
+      set((state) => ({
+        toolsStatus: state.toolsLoaded ? 'ready' : 'error',
+        toolsError: getErrorMessage(
+          error,
+          'The tool catalogue could not be loaded.'
+        ),
+      }));
+      return false;
     }
   },
 
-  toggleToolEnabled: (id) =>
+  fetchHistory: async (silent = false) => {
+    if (historyInFlight) return false;
+    historyInFlight = true;
+
+    if (!silent) {
+      set({ historyStatus: 'loading', historyError: null });
+    }
+
+    try {
+      const response = await toolsApi.listExecutions({ limit: 50, offset: 0 });
+
+      if (!response || !Array.isArray(response.executions)) {
+        throw new Error('The backend did not return an execution history list.');
+      }
+
+      set({
+        executionLogs: response.executions.map(mapBackendExecution),
+        historyTotal:
+          typeof response.total === 'number'
+            ? response.total
+            : response.executions.length,
+        historyStatus: 'ready',
+        historyLoaded: true,
+        historyError: null,
+        historyViewCleared: false,
+      });
+      return true;
+    } catch (error) {
+      set((state) => ({
+        historyStatus: state.historyLoaded ? 'ready' : 'error',
+        historyError: getErrorMessage(
+          error,
+          'Execution history could not be loaded.'
+        ),
+      }));
+      return false;
+    } finally {
+      historyInFlight = false;
+    }
+  },
+
+  fetchExecutionDetail: async (executionId) => {
+    try {
+      const response = await toolsApi.getExecution(executionId);
+
+      if (!response || typeof response.id !== 'number') {
+        throw new Error('The backend did not return that execution record.');
+      }
+
+      const record = mapBackendExecution(response);
+
+      set((state) => ({
+        executionLogs: state.executionLogs.map((entry) =>
+          entry.executionId === executionId ? record : entry
+        ),
+        historyError: null,
+      }));
+
+      return record;
+    } catch (error) {
+      set({
+        historyError: getErrorMessage(
+          error,
+          'That execution record could not be loaded.'
+        ),
+      });
+      return null;
+    }
+  },
+
+  fetchConfirmations: async (silent = false) => {
+    if (confirmationsInFlight) return false;
+    confirmationsInFlight = true;
+
+    if (!silent) {
+      set({ confirmationsStatus: 'loading', confirmationsError: null });
+    }
+
+    try {
+      const response = await toolsApi.listConfirmations();
+
+      if (!response || !Array.isArray(response.confirmations)) {
+        throw new Error(
+          'The backend did not return a pending confirmation list.'
+        );
+      }
+
+      set({
+        pendingConfirmations: response.confirmations.map(mapConfirmation),
+        confirmationsStatus: 'ready',
+        confirmationsLoaded: true,
+        confirmationsError: null,
+      });
+      return true;
+    } catch (error) {
+      set((state) => ({
+        confirmationsStatus: state.confirmationsLoaded ? 'ready' : 'error',
+        confirmationsError: getErrorMessage(
+          error,
+          'Pending confirmations could not be loaded.'
+        ),
+      }));
+      return false;
+    } finally {
+      confirmationsInFlight = false;
+    }
+  },
+
+  fetchEmergencyStop: async (silent = false) => {
+    if (emergencyStopInFlight) return false;
+    emergencyStopInFlight = true;
+
+    if (!silent) {
+      set({ emergencyStopStatus: 'loading', emergencyStopError: null });
+    }
+
+    try {
+      const response = await toolsApi.getEmergencyStop();
+
+      if (!response || typeof response.engaged !== 'boolean') {
+        throw new Error(
+          'The backend did not return an emergency-stop state.'
+        );
+      }
+
+      set({
+        emergencyStop: response,
+        emergencyStopStatus: 'ready',
+        emergencyStopError: null,
+      });
+      return true;
+    } catch (error) {
+      // Preserve the last confirmed server state; never guess.
+      set((state) => ({
+        emergencyStopStatus: state.emergencyStop ? 'ready' : 'error',
+        emergencyStopError: getErrorMessage(
+          error,
+          'Emergency-stop status could not be loaded.'
+        ),
+      }));
+      return false;
+    } finally {
+      emergencyStopInFlight = false;
+    }
+  },
+
+  fetchMetrics: async (silent = false) => {
+    if (metricsInFlight) return false;
+    metricsInFlight = true;
+
+    if (!silent) {
+      set({ metricsStatus: 'loading', metricsError: null });
+    }
+
+    try {
+      const response = await toolsApi.getMetrics();
+
+      if (!response || typeof response.executions_total !== 'number') {
+        throw new Error('The backend did not return tool metrics.');
+      }
+
+      set({
+        metrics: response,
+        metricsStatus: 'ready',
+        metricsError: null,
+      });
+      return true;
+    } catch (error) {
+      set((state) => ({
+        metricsStatus: state.metrics ? 'ready' : 'error',
+        metricsError: getErrorMessage(
+          error,
+          'Tool execution metrics could not be loaded.'
+        ),
+      }));
+      return false;
+    } finally {
+      metricsInFlight = false;
+    }
+  },
+
+  executeTool: async (toolId, params) => {
+    if (get().executionPending) {
+      return {
+        ok: false,
+        record: null,
+        error: 'Another tool execution is already in progress.',
+      };
+    }
+
+    const tool = get().tools.find((entry) => entry.id === toolId);
+
+    if (!tool) {
+      const error = 'That tool is not in the backend catalogue.';
+      set({ executionError: error });
+      return { ok: false, record: null, error };
+    }
+
+    if (!tool.enabled) {
+      const error = 'This tool is disabled by server configuration.';
+      set({ executionError: error });
+      return { ok: false, record: null, error };
+    }
+
+    set({
+      executionPending: true,
+      executionError: null,
+      actionNotice: null,
+      lastActionResult: null,
+    });
+
+    const argumentKeys = Object.keys(params);
+
+    try {
+      const result = await toolsApi.execute(
+        tool.backendName,
+        params,
+        nextIdempotencyKey(tool.backendName)
+      );
+
+      if (!result || typeof result.success !== 'boolean') {
+        throw new Error('The backend did not return an execution result.');
+      }
+
+      const record = mapResultRecord(result, {
+        toolName: tool.backendName,
+        category: tool.category,
+        confirmationId: result.confirmation_id ?? undefined,
+        argumentKeys,
+      });
+
+      if (result.confirmation_required) {
+        // A confirmation is not a success. Refresh the server-owned lists so
+        // the approval UI shows the stored preview and persisted execution.
+        set({
+          executionPending: false,
+          lastActionResult: record,
+          actionNotice:
+            'The backend requires confirmation before this action can run.',
+        });
+        await Promise.all([
+          get().fetchConfirmations(true),
+          get().fetchHistory(true),
+        ]);
+        return { ok: false, record, error: null };
+      }
+
+      const failureMessage = result.success
+        ? null
+        : result.error_message ??
+          result.error_code ??
+          'The backend reported that the execution did not succeed.';
+
+      set((state) => ({
+        executionPending: false,
+        executionError: failureMessage,
+        lastActionResult: record,
+        executionLogs: [record, ...state.executionLogs],
+      }));
+
+      // Replace the immediate record with the server's audited history when
+      // it is available. A failed refresh preserves the record above.
+      await Promise.all([get().fetchHistory(true), get().fetchMetrics(true)]);
+
+      return {
+        ok: result.success === true,
+        record,
+        error: failureMessage,
+      };
+    } catch (error) {
+      const message = getErrorMessage(
+        error,
+        'The tool could not be executed.'
+      );
+      set({ executionPending: false, executionError: message });
+      return { ok: false, record: null, error: message };
+    }
+  },
+
+  approvePendingConfirmation: async (confirmationId) => {
+    if (get().confirmationPendingIds.includes(confirmationId)) return false;
+
     set((state) => ({
-      tools: state.tools.map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)),
-    })),
+      confirmationPendingIds: [...state.confirmationPendingIds, confirmationId],
+      confirmationsError: null,
+      executionError: null,
+      actionNotice: null,
+    }));
 
-  executeToolSimulated: async (toolId, params) => {
-    const tool = get().tools.find((t) => t.id === toolId);
-    if (!tool) throw new Error(`Tool not found: ${toolId}`);
-
-    const targetToolName = tool.backendName || tool.id.replace(/^tool-/, '');
-    const startTime = Date.now();
-
-    // Attempt real backend execution if available
     try {
-      const idempotencyKey = `exec-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const res = await toolsApi.execute(targetToolName, params as Record<string, any>, idempotencyKey);
+      const response = await toolsApi.confirm(confirmationId);
 
-      const durationMs = res.duration_ms ? Math.round(res.duration_ms) : Date.now() - startTime;
-
-      if (res.confirmation_required) {
-        const confLog: ToolExecutionLog = {
-          id: `log-conf-${res.confirmation_id || Date.now()}`,
-          confirmationId: res.confirmation_id ?? undefined,
-          executionId: res.execution_id ?? undefined,
-          toolId: tool.id,
-          toolName: tool.name,
-          executedAt: new Date().toISOString(),
-          durationMs,
-          status: 'pending_approval',
-          parameters: params,
-        };
-        set((state) => ({
-          pendingConfirmation: confLog,
-          executionLogs: [confLog, ...state.executionLogs],
-        }));
-        return confLog;
+      if (!response || !response.confirmation) {
+        throw new Error('The backend did not return the resolved confirmation.');
       }
 
-      const outText =
-        typeof res.data === 'string'
-          ? res.data
-          : res.data !== null && res.data !== undefined
-          ? JSON.stringify(res.data, null, 2)
-          : 'Execution completed successfully.';
-
-      const successLog: ToolExecutionLog = {
-        id: `log-exec-${res.execution_id || Date.now()}`,
-        executionId: res.execution_id ?? undefined,
-        toolId: tool.id,
-        toolName: tool.name,
-        executedAt: new Date().toISOString(),
-        durationMs,
-        status: res.success ? 'success' : 'failed',
-        parameters: params,
-        output: res.success ? outText : undefined,
-        errorMessage: !res.success ? (res.error_message || 'Tool execution rejected') : undefined,
-      };
+      const record = mapConfirmationActionRecord(
+        response.confirmation,
+        response.result
+      );
 
       set((state) => ({
-        executionLogs: [successLog, ...state.executionLogs],
+        confirmationPendingIds: state.confirmationPendingIds.filter(
+          (id) => id !== confirmationId
+        ),
+        pendingConfirmations: state.pendingConfirmations.filter(
+          (entry) => entry.id !== confirmationId
+        ),
+        lastActionResult: record,
+        executionError: record.success
+          ? null
+          : record.errorMessage ??
+            record.errorCode ??
+            'The backend reported that the approved action did not succeed.',
+        actionNotice: record.success
+          ? 'The backend executed the approved action.'
+          : 'The backend resolved the confirmation.',
       }));
-      return successLog;
-    } catch {
-      // Offline fallback: simulated execution
-      const newLog: ToolExecutionLog = {
-        id: `log-${Date.now()}`,
-        toolId: tool.id,
-        toolName: tool.name,
-        executedAt: new Date().toISOString(),
-        durationMs: Math.floor(Math.random() * 80) + 25,
-        status: tool.confirmationRequired ? 'pending_approval' : 'success',
-        parameters: params,
-        output: tool.confirmationRequired ? undefined : tool.sampleOutput,
-      };
 
-      if (tool.confirmationRequired) {
-        set((state) => ({
-          pendingConfirmation: newLog,
-          executionLogs: [newLog, ...state.executionLogs],
-        }));
-        return newLog;
-      }
+      await Promise.all([
+        get().fetchHistory(true),
+        get().fetchConfirmations(true),
+        get().fetchMetrics(true),
+      ]);
 
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      return true;
+    } catch (error) {
+      // Keep the pending confirmation so the operator can retry.
       set((state) => ({
-        executionLogs: [newLog, ...state.executionLogs],
+        confirmationPendingIds: state.confirmationPendingIds.filter(
+          (id) => id !== confirmationId
+        ),
+        confirmationsError: getErrorMessage(
+          error,
+          'The confirmation could not be approved.'
+        ),
       }));
-      return newLog;
+      return false;
     }
   },
 
-  approvePendingConfirmation: async () => {
-    const pending = get().pendingConfirmation;
-    if (!pending) return;
+  rejectPendingConfirmation: async (confirmationId) => {
+    if (get().confirmationPendingIds.includes(confirmationId)) return false;
 
-    if (pending.confirmationId) {
-      try {
-        await toolsApi.confirm(pending.confirmationId);
-      } catch {
-        // Handled
-      }
-    }
+    set((state) => ({
+      confirmationPendingIds: [...state.confirmationPendingIds, confirmationId],
+      confirmationsError: null,
+      executionError: null,
+      actionNotice: null,
+    }));
 
-    set((state) => {
-      const targetId = pending.id;
-      const tool = state.tools.find((t) => t.id === pending.toolId);
-      return {
-        pendingConfirmation: null,
-        executionLogs: state.executionLogs.map((log) =>
-          log.id === targetId
-            ? {
-                ...log,
-                status: 'success',
-                output: tool?.sampleOutput || 'Action executed successfully after owner confirmation.',
-                confirmedBy: 'Owner (Manual Approval)',
-              }
-            : log
-        ),
-      };
-    });
-  },
-
-  rejectPendingConfirmation: async () => {
-    const pending = get().pendingConfirmation;
-    if (!pending) return;
-
-    if (pending.confirmationId) {
-      try {
-        await toolsApi.reject(pending.confirmationId);
-      } catch {
-        // Handled
-      }
-    }
-
-    set((state) => {
-      const targetId = pending.id;
-      return {
-        pendingConfirmation: null,
-        executionLogs: state.executionLogs.map((log) =>
-          log.id === targetId
-            ? {
-                ...log,
-                status: 'cancelled',
-                errorMessage: 'Execution rejected by owner policy confirmation.',
-              }
-            : log
-        ),
-      };
-    });
-  },
-
-  toggleEmergencyStop: async () => {
     try {
-      const res = await toolsApi.engageEmergencyStop();
-      set({ emergencyStopActive: res.engaged });
-    } catch {
-      // Toggle locally if backend unavailable
-      set((state) => ({ emergencyStopActive: !state.emergencyStopActive }));
+      const response = await toolsApi.reject(confirmationId);
+
+      if (!response || !response.confirmation) {
+        throw new Error('The backend did not return the resolved confirmation.');
+      }
+
+      set((state) => ({
+        confirmationPendingIds: state.confirmationPendingIds.filter(
+          (id) => id !== confirmationId
+        ),
+        pendingConfirmations: state.pendingConfirmations.filter(
+          (entry) => entry.id !== confirmationId
+        ),
+        lastActionResult: null,
+        actionNotice: `The backend marked the confirmation "${response.confirmation.status}".`,
+      }));
+
+      await Promise.all([
+        get().fetchHistory(true),
+        get().fetchConfirmations(true),
+        get().fetchMetrics(true),
+      ]);
+
+      return true;
+    } catch (error) {
+      set((state) => ({
+        confirmationPendingIds: state.confirmationPendingIds.filter(
+          (id) => id !== confirmationId
+        ),
+        confirmationsError: getErrorMessage(
+          error,
+          'The confirmation could not be rejected.'
+        ),
+      }));
+      return false;
     }
   },
 
-  clearLogs: () => set({ executionLogs: [] }),
+  engageEmergencyStop: async () => {
+    if (get().emergencyStopPending) return false;
+
+    set({ emergencyStopPending: true, emergencyStopError: null });
+
+    try {
+      const response = await toolsApi.engageEmergencyStop();
+
+      if (!response || typeof response.engaged !== 'boolean') {
+        throw new Error(
+          'The backend did not return an emergency-stop state.'
+        );
+      }
+
+      set({
+        emergencyStop: response,
+        emergencyStopStatus: 'ready',
+        emergencyStopPending: false,
+        emergencyStopError: null,
+        actionNotice: response.engaged
+          ? 'The backend confirmed the emergency stop.'
+          : 'The backend reported the emergency stop is not engaged.',
+      });
+
+      await Promise.all([
+        get().fetchConfirmations(true),
+        get().fetchHistory(true),
+      ]);
+
+      return true;
+    } catch (error) {
+      // Preserve the last confirmed state; do not flip locally.
+      set({
+        emergencyStopPending: false,
+        emergencyStopError: getErrorMessage(
+          error,
+          'The emergency stop could not be engaged.'
+        ),
+      });
+      return false;
+    }
+  },
+
+  recoverEmergencyStop: async (recoveryToken) => {
+    if (get().emergencyStopPending) return false;
+
+    const token = recoveryToken.trim();
+
+    if (!token) {
+      set({
+        emergencyStopError:
+          'A server recovery token is required to clear the emergency stop.',
+      });
+      return false;
+    }
+
+    set({ emergencyStopPending: true, emergencyStopError: null });
+
+    try {
+      const response = await toolsApi.recoverEmergencyStop(token);
+
+      if (!response || typeof response.engaged !== 'boolean') {
+        throw new Error(
+          'The backend did not return an emergency-stop state.'
+        );
+      }
+
+      set({
+        emergencyStop: response,
+        emergencyStopStatus: 'ready',
+        emergencyStopPending: false,
+        emergencyStopError: null,
+        actionNotice: 'The backend confirmed the emergency stop was cleared.',
+      });
+
+      await get().fetchConfirmations(true);
+      return true;
+    } catch (error) {
+      set({
+        emergencyStopPending: false,
+        emergencyStopError: getErrorMessage(
+          error,
+          'The emergency stop could not be recovered.'
+        ),
+      });
+      return false;
+    }
+  },
+
+  clearHistoryView: () =>
+    set({ historyViewCleared: true, historyError: null }),
+
+  clearToolsError: () => set({ toolsError: null }),
+  clearHistoryError: () => set({ historyError: null }),
+  clearConfirmationsError: () => set({ confirmationsError: null }),
+  clearEmergencyStopError: () => set({ emergencyStopError: null }),
+  clearMetricsError: () => set({ metricsError: null }),
+  clearExecutionError: () => set({ executionError: null }),
+  clearActionNotice: () => set({ actionNotice: null }),
 }));
+
+export default useToolStore;

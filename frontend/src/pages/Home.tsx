@@ -21,9 +21,18 @@ import { useAuthStore } from '../stores/auth.store';
 import { useChatStore } from '../stores/chat.store';
 import { useTaskStore } from '../stores/task.store';
 import { useReminderStore } from '../stores/reminder.store';
+import { isLiveReminder } from '../types/reminder.types';
 import { useMemoryStore } from '../stores/memory.store';
 import { useSystemStore } from '../stores/system.store';
+import { useSettingsStore } from '../stores/settings.store';
 import { formatDate } from '../utils/formatDate';
+
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
 
 export interface HomeProps {
   onNavigate: (section: NavSectionId) => void;
@@ -32,37 +41,55 @@ export interface HomeProps {
 export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
   const user = useAuthStore((s) => s.user);
   const conversations = useChatStore((s) => s.conversations);
-  const sendMessage = useChatStore((s) => s.sendMessage);
+  const sendNewConversationMessage = useChatStore((s) => s.startNewConversationWithMessage);
   const setActiveConversationId = useChatStore((s) => s.setActiveConversationId);
   const createNewConversation = useChatStore((s) => s.createNewConversation);
+  const isSending = useChatStore((s) => s.isSending);
+  const isStreaming = useChatStore((s) => s.isStreaming);
 
   const tasks = useTaskStore((s) => s.tasks);
   const toggleTaskCompleted = useTaskStore((s) => s.toggleTaskCompleted);
   const addTask = useTaskStore((s) => s.addTask);
 
   const reminders = useReminderStore((s) => s.reminders);
-  const toggleReminderCompleted = useReminderStore((s) => s.toggleReminderCompleted);
 
   const memories = useMemoryStore((s) => s.memories);
-  const metrics = useSystemStore((s) => s.metrics);
+  const settings = useSettingsStore((s) => s.settings);
+  const systemSnapshot = useSystemStore((s) => s.snapshot);
+  const memoryLoad =
+    systemSnapshot?.memory.available && systemSnapshot.memory.usagePercent !== null
+      ? systemSnapshot.memory.usagePercent
+      : null;
 
   const [quickPrompt, setQuickPrompt] = useState('');
   const [quickTaskTitle, setQuickTaskTitle] = useState('');
   const [showQuickTaskInput, setShowQuickTaskInput] = useState(false);
 
-  const latestMetric = metrics[metrics.length - 1] || { cpuPercent: 14, memoryPercent: 46 };
   const pendingTasks = tasks.filter((t) => !t.completed);
   const completedTasksCount = tasks.filter((t) => t.completed).length;
-  const todayReminders = reminders.filter((r) => !r.completed);
+  const todayReminders = reminders
+    .map((r) => {
+      const task = tasks.find(
+        (t) => t.backendId === r.taskId || t.id === String(r.taskId)
+      );
+      return task ? { ...r, title: task.title } : r;
+    })
+    .filter((r) => isLiveReminder(r.status));
 
   const handleQuickPromptSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = quickPrompt.trim();
-    if (!trimmed) return;
-    createNewConversation();
-    onNavigate('chat');
-    await sendMessage(trimmed);
+    if (!trimmed || isSending || isStreaming) return;
+
     setQuickPrompt('');
+    onNavigate('chat');
+
+    // Creation is awaited inside the store, then the message is streamed using
+    // the real backend conversation id. A failure keeps the draft for retry.
+    const result = await sendNewConversationMessage(trimmed);
+    if (!result.ok && result.conversationId === null) {
+      setQuickPrompt(trimmed);
+    }
   };
 
   const handleCreateQuickTask = (e: React.FormEvent) => {
@@ -104,11 +131,11 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
             </div>
 
             <h1 className="text-2xl font-extrabold tracking-tight text-white sm:text-3xl">
-              Good evening, {user.name}.
+              {greeting()}, {user.name}.
             </h1>
             <p className="max-w-2xl text-xs sm:text-sm text-slate-400 leading-relaxed">
-              Your personal assistant workspace is initialized. Local tool execution sandbox is
-              active, semantic memory is synchronized, and background queues are running normally.
+              Use the shortcuts below to start a backend-backed chat, review your tasks and
+              reminders, and open diagnostics. Metrics are shown only when the backend confirms them.
             </p>
           </div>
 
@@ -116,7 +143,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
             <button
               type="button"
               onClick={() => {
-                createNewConversation();
+                void createNewConversation();
                 onNavigate('chat');
               }}
               className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 px-5 py-3 text-xs sm:text-sm font-semibold text-white shadow-lg shadow-indigo-600/25 transition hover:from-indigo-500 hover:to-violet-500 active:scale-[0.98]"
@@ -147,10 +174,10 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
             />
             <button
               type="submit"
-              disabled={!quickPrompt.trim()}
+              disabled={!quickPrompt.trim() || isSending || isStreaming}
               className="absolute right-1.5 flex h-9 items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-40"
             >
-              <span>Ask ASTA</span>
+              <span>{isSending ? 'Creating...' : 'Ask ASTA'}</span>
               <Send className="h-3.5 w-3.5" />
             </button>
           </form>
@@ -229,13 +256,23 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-400">System Load</span>
-            <div className="rounded-lg bg-emerald-500/10 p-2 text-emerald-400 group-hover:bg-emerald-500/20">
+            <div
+              className={`rounded-lg p-2 group-hover:opacity-80 ${
+                memoryLoad === null
+                  ? 'bg-amber-500/10 text-amber-400'
+                  : 'bg-emerald-500/10 text-emerald-400'
+              }`}
+            >
               <Activity className="h-4 w-4" />
             </div>
           </div>
           <div className="mt-3 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-white">{latestMetric.cpuPercent}%</span>
-            <span className="text-xs text-slate-500">CPU · {latestMetric.memoryPercent}% RAM</span>
+            <span className="text-2xl font-bold text-white">
+              {memoryLoad === null ? '—' : `${memoryLoad}%`}
+            </span>
+            <span className="text-xs text-slate-500">
+              CPU unavailable · {memoryLoad === null ? 'RAM unavailable' : `${memoryLoad}% RAM`}
+            </span>
           </div>
           <div className="mt-2 flex items-center gap-1 text-[11px] font-medium text-emerald-400">
             <span>Diagnostics</span>
@@ -267,6 +304,11 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
             </div>
 
             <div className="mt-3 divide-y divide-slate-800/60">
+              {conversations.length === 0 && (
+                <p className="py-6 text-center text-xs text-slate-500">
+                  No conversations yet. Start a new chat to begin.
+                </p>
+              )}
               {conversations.slice(0, 3).map((conv) => (
                 <div
                   key={conv.id}
@@ -285,12 +327,16 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
                       )}
                     </div>
                     <p className="mt-1 text-xs text-slate-500 line-clamp-1">
-                      {conv.previewSnippet}
+                      {conv.messagesLoaded
+                        ? conv.previewSnippet || 'No messages yet'
+                        : 'Message history not loaded'}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1">
                     <span className="text-[10px] font-mono text-slate-500">
-                      {conv.messages.length} msgs
+                      {conv.messagesLoaded
+                        ? `${conv.messageCount ?? conv.messages.length} msgs`
+                        : 'Not loaded'}
                     </span>
                     <ArrowRight className="h-3.5 w-3.5 text-slate-600 transition-transform group-hover:translate-x-1 group-hover:text-indigo-400" />
                   </div>
@@ -405,7 +451,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
               <button
                 type="button"
                 onClick={() => {
-                  createNewConversation();
+                  void createNewConversation();
                   onNavigate('chat');
                 }}
                 className="flex flex-col items-start gap-1.5 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-left transition hover:border-indigo-500/40 hover:bg-slate-900"
@@ -432,7 +478,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
               >
                 <Wrench className="h-4 w-4 text-cyan-400" />
                 <span className="text-xs font-semibold text-slate-200">Run Tool</span>
-                <span className="text-[10px] text-slate-500">Sandboxed exec</span>
+                <span className="text-[10px] text-slate-500">Server-executed</span>
               </button>
 
               <button
@@ -475,14 +521,9 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
                     <p className="text-xs font-semibold text-slate-200 truncate">{rem.title}</p>
                     <span className="text-[10px] font-mono text-amber-300">{rem.time} · {rem.category}</span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => toggleReminderCompleted(rem.id)}
-                    className="rounded p-1 text-slate-500 hover:text-emerald-400"
-                    title="Mark complete"
-                  >
-                    <CheckCircle2 className="h-4 w-4" />
-                  </button>
+                  <span className="shrink-0 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold capitalize text-amber-300">
+                    {rem.status}
+                  </span>
                 </div>
               ))}
             </div>
@@ -491,34 +532,34 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
           {/* Assistant Security & State Overview */}
           <div className="rounded-2xl border border-slate-800/80 bg-slate-900/30 p-5 shadow-lg">
             <h2 className="text-sm font-bold text-white uppercase tracking-wider mb-3">
-              Runtime Security State
+              Runtime Configuration
             </h2>
             <div className="space-y-2 text-xs">
               <div className="flex items-center justify-between rounded-lg bg-slate-950 p-2.5">
                 <span className="flex items-center gap-2 text-slate-400">
                   <Shield className="h-3.5 w-3.5 text-indigo-400" />
-                  Execution Boundary
+                  Tool execution
                 </span>
                 <span className="font-mono text-emerald-400 text-[11px] font-semibold">
-                  AUDITED SANDBOX
+                  Backend-controlled
                 </span>
               </div>
               <div className="flex items-center justify-between rounded-lg bg-slate-950 p-2.5">
                 <span className="flex items-center gap-2 text-slate-400">
                   <Layers className="h-3.5 w-3.5 text-cyan-400" />
-                  Model Router
+                  Selected model
                 </span>
                 <span className="font-mono text-slate-200 text-[11px]">
-                  Hybrid (Groq + Ollama)
+                  {settings.defaultModel || 'Not configured'}
                 </span>
               </div>
               <div className="flex items-center justify-between rounded-lg bg-slate-950 p-2.5">
                 <span className="flex items-center gap-2 text-slate-400">
                   <Brain className="h-3.5 w-3.5 text-violet-400" />
-                  Vector Retain
+                  Memory store
                 </span>
                 <span className="font-mono text-slate-200 text-[11px]">
-                  384-dim (Local)
+                  Managed in Memory
                 </span>
               </div>
             </div>

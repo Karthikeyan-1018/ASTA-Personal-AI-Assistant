@@ -9,8 +9,6 @@ export interface UserSettings {
   streamingSpeed: 'fast' | 'normal' | 'relaxed';
   sendOnEnter: boolean;
   codeWrap: boolean;
-  soundAlerts: boolean;
-  desktopPush: boolean;
   retentionDays: number;
   privateModeDefault: boolean;
   confirmElevatedTools: boolean;

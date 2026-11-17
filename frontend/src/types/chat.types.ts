@@ -2,6 +2,12 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 
 export type StreamPhase = 'idle' | 'starting' | 'streaming' | 'error';
 
+/**
+ * Local delivery state for a rendered message. Only assistant messages can be
+ * `streaming`, `failed` or `incomplete`; persisted messages are `complete`.
+ */
+export type ChatMessageStatus = 'streaming' | 'complete' | 'failed' | 'incomplete';
+
 export interface ChatRequestPayload {
   message: string;
   private?: boolean;
@@ -84,6 +90,7 @@ export interface ConversationMessage {
   provider?: string;
   model?: string;
   isPrivate?: boolean;
+  status?: ChatMessageStatus;
   toolExecutions?: ToolExecutionSummary[];
   pendingConfirmations?: PendingConfirmationItem[];
 }

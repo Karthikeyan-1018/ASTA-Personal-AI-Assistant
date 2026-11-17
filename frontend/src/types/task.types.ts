@@ -1,10 +1,24 @@
 export type TaskPriority = 'low' | 'medium' | 'high' | 'critical';
-export type TaskStatus = 'pending' | 'in_progress' | 'completed';
+/** `unknown` is explicit: the backend returned a value this client cannot handle. */
+export type TaskStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'cancelled'
+  | 'unknown';
 export type TaskCategory = 'General' | 'Memory' | 'Security' | 'Development' | 'System' | 'Research';
+export type TaskBackendStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'cancelled'
+  | 'unknown';
 
 export interface TaskItem {
   id: string;
   backendId?: number;
+  /** Exact last-confirmed backend status; never an optimistic display value. */
+  backendStatus?: TaskBackendStatus;
   title: string;
   description?: string;
   category: TaskCategory;

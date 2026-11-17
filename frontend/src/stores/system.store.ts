@@ -1,70 +1,236 @@
 import { create } from 'zustand';
-import type { SystemResourceMetric, SystemProcess, BackendServiceStatus } from '../types/system.types';
+import systemApi from '../services/api/system.api';
+import type { ToolMetricsResponse, ToolResultResponse } from '../types/api.types';
+import type {
+  HistoryPoint,
+  SystemMonitorStatus,
+  SystemSnapshot,
+} from '../types/system.types';
+import {
+  appendHistory,
+  mapProcessSummary,
+  mapProviderHealth,
+  mapSystemSummary,
+  mapToolRuntime,
+  snapshotHasRealData,
+} from '../utils/systemMetrics';
+import type { ProviderHealthResponse } from '../services/api/system.api';
 
-const INITIAL_METRICS: SystemResourceMetric[] = [
-  { timestamp: '18:50', cpuPercent: 12, memoryPercent: 44, memoryUsedGb: 14.1, memoryTotalGb: 32, diskUsedGb: 412, diskTotalGb: 1024 },
-  { timestamp: '18:55', cpuPercent: 18, memoryPercent: 45, memoryUsedGb: 14.4, memoryTotalGb: 32, diskUsedGb: 412, diskTotalGb: 1024 },
-  { timestamp: '19:00', cpuPercent: 15, memoryPercent: 46, memoryUsedGb: 14.7, memoryTotalGb: 32, diskUsedGb: 412, diskTotalGb: 1024 },
-  { timestamp: '19:05', cpuPercent: 28, memoryPercent: 48, memoryUsedGb: 15.3, memoryTotalGb: 32, diskUsedGb: 413, diskTotalGb: 1024 },
-  { timestamp: '19:10', cpuPercent: 22, memoryPercent: 47, memoryUsedGb: 15.0, memoryTotalGb: 32, diskUsedGb: 413, diskTotalGb: 1024 },
-  { timestamp: '19:15', cpuPercent: 16, memoryPercent: 46, memoryUsedGb: 14.8, memoryTotalGb: 32, diskUsedGb: 413, diskTotalGb: 1024 },
-  { timestamp: '19:20', cpuPercent: 14, memoryPercent: 46, memoryUsedGb: 14.8, memoryTotalGb: 32, diskUsedGb: 413, diskTotalGb: 1024 },
-];
+/** Confirmed product decision: poll real backend data every 20 seconds. */
+export const SYSTEM_MONITOR_REFRESH_MS = 20_000;
 
-const INITIAL_PROCESSES: SystemProcess[] = [
-  { pid: 14220, name: 'python.exe (FastAPI ASTA Core)', cpuPercent: 1.8, memoryMb: 285, status: 'running', user: 'SYSTEM' },
-  { pid: 8940, name: 'node.exe (Vite Dev Server)', cpuPercent: 0.6, memoryMb: 142, status: 'running', user: 'karthik' },
-  { pid: 1104, name: 'postgres.exe (PostgreSQL 18)', cpuPercent: 0.4, memoryMb: 340, status: 'idle', user: 'postgres' },
-  { pid: 19828, name: 'ollama_llama_server.exe', cpuPercent: 0.2, memoryMb: 4200, status: 'idle', user: 'karthik' },
-  { pid: 6512, name: 'pgvector_worker.exe', cpuPercent: 0.1, memoryMb: 118, status: 'sleeping', user: 'postgres' },
-  { pid: 4320, name: 'powershell.exe', cpuPercent: 0.0, memoryMb: 82, status: 'idle', user: 'karthik' },
-];
+export type RefreshReason = 'initial' | 'auto' | 'manual' | 'focus' | 'retry';
 
-const INITIAL_SERVICES: BackendServiceStatus[] = [
-  { name: 'FastAPI Core Runtime', status: 'simulated', latencyMs: 14, uptime: '74h 15m', version: 'v1.4.0', details: 'Phase 13 Endpoints defined' },
-  { name: 'PostgreSQL 18 + pgvector', status: 'simulated', latencyMs: 4, uptime: '120h 42m', version: 'Postgres 18.1', details: 'HNSW vector index ready' },
-  { name: 'Hybrid LLM Router', status: 'simulated', latencyMs: 8, uptime: '74h 15m', version: 'v2.1 Router', details: 'Groq + Ollama switchboard' },
-  { name: 'Ollama Engine (Local)', status: 'simulated', latencyMs: 28, uptime: '32h 10m', version: 'v0.5.8', details: 'DeepSeek-R1-Distill-Qwen loaded' },
-  { name: 'OS Tool Sandbox Guard', status: 'healthy', latencyMs: 1, uptime: '74h 15m', version: 'ASTA-Sec v1', details: 'Audited execution boundary active' },
-];
-
-interface SystemStoreState {
-  metrics: SystemResourceMetric[];
-  processes: SystemProcess[];
-  services: BackendServiceStatus[];
-  refreshTelemetry: () => void;
-  terminateProcess: (pid: number) => void;
+interface RefreshOptions {
+  reason?: RefreshReason;
 }
 
-export const useSystemStore = create<SystemStoreState>((set) => ({
-  metrics: INITIAL_METRICS,
-  processes: INITIAL_PROCESSES,
-  services: INITIAL_SERVICES,
-  refreshTelemetry: () =>
-    set((state) => {
-      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const last = state.metrics[state.metrics.length - 1];
-      const newCpu = Math.max(8, Math.min(65, Math.floor(last.cpuPercent + (Math.random() * 12 - 6))));
-      const newMem = Math.max(40, Math.min(55, Number((last.memoryPercent + (Math.random() * 2 - 1)).toFixed(1))));
-      const newMemGb = Number(((newMem / 100) * 32).toFixed(1));
+interface SystemStoreState {
+  snapshot: SystemSnapshot | null;
+  history: HistoryPoint[];
+  status: SystemMonitorStatus;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  isPolling: boolean;
+  isBackendConnected: boolean;
+  error: string | null;
+  lastSuccessfulAt: string | null;
+  lastRefreshReason: RefreshReason | null;
+  refresh: (options?: RefreshOptions) => Promise<boolean>;
+  retry: () => Promise<boolean>;
+  refreshIfStale: () => Promise<boolean>;
+  startPolling: () => void;
+  stopPolling: () => void;
+}
 
-      const updatedHistory = [
-        ...state.metrics.slice(1),
-        {
-          timestamp: now,
-          cpuPercent: newCpu,
-          memoryPercent: newMem,
-          memoryUsedGb: newMemGb,
-          memoryTotalGb: 32,
-          diskUsedGb: last.diskUsedGb,
-          diskTotalGb: last.diskTotalGb,
-        },
-      ];
+let inFlight = false;
+let requestSequence = 0;
+/** Incremented on unmount so an in-flight response cannot update dead UI. */
+let sessionGeneration = 0;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-      return { metrics: updatedHistory };
-    }),
-  terminateProcess: (pid) =>
-    set((state) => ({
-      processes: state.processes.filter((p) => p.pid !== pid),
-    })),
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err) return err;
+  return fallback;
+}
+
+function settledValue<T>(
+  result: PromiseSettledResult<T>,
+  label: string,
+  errors: string[]
+): T | null {
+  if (result.status === 'fulfilled') return result.value;
+  errors.push(`${label}: ${getErrorMessage(result.reason, 'request failed')}`);
+  return null;
+}
+
+export const useSystemStore = create<SystemStoreState>((set, get) => ({
+  snapshot: null,
+  history: [],
+  status: 'idle',
+  isLoading: false,
+  isRefreshing: false,
+  isPolling: false,
+  isBackendConnected: false,
+  error: null,
+  lastSuccessfulAt: null,
+  lastRefreshReason: null,
+
+  refresh: async (options = {}) => {
+    // One shared guard prevents overlapping manual, focus and interval writes.
+    if (inFlight) return false;
+
+    inFlight = true;
+    const sequence = ++requestSequence;
+    const generation = sessionGeneration;
+    const hadSnapshot = get().snapshot !== null;
+    const reason = options.reason || 'manual';
+
+    set({
+      isLoading: !hadSnapshot,
+      isRefreshing: hadSnapshot,
+      isBackendConnected: false,
+      error: null,
+      status: hadSnapshot ? 'refreshing' : 'loading',
+      lastRefreshReason: reason,
+    });
+
+    try {
+      const [providerResult, runtimeResult, summaryResult, processResult] =
+        await Promise.allSettled([
+          systemApi.getProviderHealth(),
+          systemApi.getToolMetrics(),
+          systemApi.getSystemSummary(),
+          systemApi.getProcessSummary(),
+        ]);
+
+      // Discard a superseded response; only the latest request may write state.
+      if (sequence !== requestSequence || generation !== sessionGeneration) {
+        return false;
+      }
+
+      const errors: string[] = [];
+      const providerWire = settledValue<ProviderHealthResponse>(
+        providerResult,
+        'Provider health',
+        errors
+      );
+      const runtimeWire = settledValue<ToolMetricsResponse>(
+        runtimeResult,
+        'Tool metrics',
+        errors
+      );
+      const summaryWire = settledValue<ToolResultResponse>(
+        summaryResult,
+        'System information tool',
+        errors
+      );
+      const processWire = settledValue<ToolResultResponse>(
+        processResult,
+        'Process inspection tool',
+        errors
+      );
+
+      const summary = mapSystemSummary(summaryWire);
+      const snapshot: SystemSnapshot = {
+        collectedAt: new Date().toISOString(),
+        ...summary,
+        processes: mapProcessSummary(processWire),
+        providers: mapProviderHealth(providerWire),
+        toolRuntime: mapToolRuntime(runtimeWire),
+      };
+      const hasData = snapshotHasRealData(snapshot);
+
+      // Every source failed: this is a failed refresh, not an empty success.
+      // Keep the last confirmed snapshot instead of replacing it with nulls.
+      if (!hasData && errors.length > 0) {
+        set((state) => ({
+          isLoading: false,
+          isRefreshing: false,
+          isBackendConnected: false,
+          error: errors.join('; '),
+          status: state.snapshot ? 'stale' : 'unavailable',
+        }));
+        return false;
+      }
+
+      // The backend responded but confirmed no measurements at all.
+      if (!hasData) {
+        set((state) => ({
+          snapshot: null,
+          history: state.history,
+          isLoading: false,
+          isRefreshing: false,
+          isBackendConnected: true,
+          error: null,
+          lastSuccessfulAt: state.lastSuccessfulAt,
+          status: 'unavailable',
+        }));
+        return false;
+      }
+
+      set((state) => ({
+        snapshot,
+        history: appendHistory(state.history, snapshot),
+        isLoading: false,
+        isRefreshing: false,
+        isBackendConnected: true,
+        error: errors.length > 0 ? errors.join('; ') : null,
+        lastSuccessfulAt: snapshot.collectedAt,
+        status: 'connected',
+      }));
+
+      return true;
+    } catch (err: unknown) {
+      if (sequence !== requestSequence || generation !== sessionGeneration) {
+        return false;
+      }
+      // Keep the last confirmed snapshot and history exactly as they were.
+      set((state) => ({
+        isLoading: false,
+        isRefreshing: false,
+        isBackendConnected: false,
+        error: getErrorMessage(err, 'Could not refresh system metrics.'),
+        status: state.snapshot ? 'stale' : 'unavailable',
+      }));
+      return false;
+    } finally {
+      inFlight = false;
+    }
+  },
+
+  retry: () => get().refresh({ reason: 'retry' }),
+
+  refreshIfStale: () => {
+    const { lastSuccessfulAt, status } = get();
+    const parsed = lastSuccessfulAt ? Date.parse(lastSuccessfulAt) : Number.NaN;
+    const stale =
+      !Number.isFinite(parsed) ||
+      status === 'unavailable' ||
+      status === 'stale' ||
+      Date.now() - parsed >= SYSTEM_MONITOR_REFRESH_MS;
+
+    return stale ? get().refresh({ reason: 'focus' }) : Promise.resolve(false);
+  },
+
+  startPolling: () => {
+    if (pollTimer !== null) return;
+    set({ isPolling: true });
+    pollTimer = globalThis.setInterval(() => {
+      void get().refresh({ reason: 'auto' });
+    }, SYSTEM_MONITOR_REFRESH_MS);
+  },
+
+  stopPolling: () => {
+    if (pollTimer !== null) {
+      globalThis.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    // Invalidate any response still in flight when the page unmounts.
+    sessionGeneration += 1;
+    set({ isPolling: false });
+  },
 }));
+
+export default useSystemStore;

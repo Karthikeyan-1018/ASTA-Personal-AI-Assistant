@@ -5,7 +5,9 @@ import type {
   ToolConfirmationListResponse,
   ToolExecuteRequest,
   ToolExecutionListResponse,
+  ToolExecutionResponse,
   ToolListResponse,
+  ToolMetricsResponse,
   ToolResultResponse,
 } from '../../types/api.types';
 
@@ -51,6 +53,13 @@ export const toolsApi = {
     return response.data;
   },
 
+  async getExecution(executionId: number): Promise<ToolExecutionResponse> {
+    const response = await apiClient.get<ToolExecutionResponse>(
+      `/api/tools/executions/${executionId}`
+    );
+    return response.data;
+  },
+
   async listConfirmations(
     conversationId?: number
   ): Promise<ToolConfirmationListResponse> {
@@ -87,6 +96,28 @@ export const toolsApi = {
   async engageEmergencyStop(): Promise<EmergencyStopResponse> {
     const response = await apiClient.post<EmergencyStopResponse>(
       '/api/tools/emergency-stop'
+    );
+    return response.data;
+  },
+
+  async recoverEmergencyStop(
+    recoveryToken: string
+  ): Promise<EmergencyStopResponse> {
+    const response = await apiClient.post<EmergencyStopResponse>(
+      '/api/tools/emergency-stop/recover',
+      undefined,
+      {
+        headers: {
+          'X-Emergency-Recovery-Token': recoveryToken,
+        },
+      }
+    );
+    return response.data;
+  },
+
+  async getMetrics(): Promise<ToolMetricsResponse> {
+    const response = await apiClient.get<ToolMetricsResponse>(
+      '/api/tools/metrics'
     );
     return response.data;
   },

@@ -62,6 +62,20 @@ export const tasksApi = {
     return response.data;
   },
 
+  /**
+   * Cancel through the backend's existing status-only endpoint. There is no
+   * dedicated `/cancel` route; the backend task-intent executor uses the same
+   * `change_status` service path for cancellation. Sending only `status` keeps
+   * every unrelated task field unchanged.
+   */
+  async cancel(taskId: number): Promise<TaskResponse> {
+    const response = await apiClient.post<TaskResponse>(
+      `/api/tasks/${taskId}/status`,
+      { status: 'cancelled' }
+    );
+    return response.data;
+  },
+
   async getUpcoming(days?: number): Promise<TaskResponse[]> {
     const response = await apiClient.get<TaskResponse[]>('/api/tasks/upcoming', {
       params: days ? { days } : undefined,

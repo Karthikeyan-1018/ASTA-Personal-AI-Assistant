@@ -2,6 +2,7 @@ import React from 'react';
 import Sidebar, { type NavSectionId } from './Sidebar';
 import Topbar from './Topbar';
 import StatusBar from './StatusBar';
+import ToastViewport from '../notifications/ToastViewport';
 import { useUIStore } from '../../stores/ui.store';
 
 export interface AppLayoutProps {
@@ -11,15 +12,18 @@ export interface AppLayoutProps {
   pageAction?: React.ReactNode;
 }
 
+/** Keep the status bar labels aligned with the navigation labels in Sidebar. */
 const SECTION_LABELS: Record<NavSectionId, string> = {
-  home: 'Home Dashboard',
-  chat: 'AI Conversation',
-  tasks: 'Task Management',
+  home: 'Home',
+  chat: 'Chat',
+  tasks: 'Tasks',
   reminders: 'Reminders',
-  memory: 'Long-Term Memory',
-  tools: 'Tool Sandbox',
-  'system-monitor': 'System Telemetry',
-  settings: 'Preferences',
+  recurrences: 'Recurrences',
+  'background-tasks': 'Background Tasks',
+  memory: 'Memory',
+  tools: 'Tools',
+  'system-monitor': 'System Monitor',
+  settings: 'Settings',
 };
 
 export const AppLayout: React.FC<AppLayoutProps> = ({
@@ -61,6 +65,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
 
         <StatusBar activeSectionLabel={SECTION_LABELS[activeSection]} />
       </div>
+
+      <ToastViewport />
     </div>
   );
 };

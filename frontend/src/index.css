@@ -33,6 +33,12 @@
     flex-direction: column;
     overflow: hidden;
   }
+
+  /* Keep keyboard focus visible on every interactive control. */
+  :where(a, button, input, select, textarea, [role='button'], [tabindex]):focus-visible {
+    outline: 2px solid #818cf8;
+    outline-offset: 2px;
+  }
 }
 
 /* Custom scrollbars for desktop feel */

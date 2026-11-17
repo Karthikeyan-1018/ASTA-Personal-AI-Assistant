@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useSettingsStore } from '../stores/settings.store';
 import { useAuthStore } from '../stores/auth.store';
+import NotificationPreferencesPanel from '../components/settings/NotificationPreferencesPanel';
 import type { UserSettings } from '../types/settings.types';
 
 type SettingsTab =
@@ -60,7 +61,8 @@ export const Settings: React.FC = () => {
             Desktop Preferences & Configuration
           </h1>
           <p className="text-xs sm:text-sm text-slate-400">
-            Personalize your assistant persona, UI theme, model routing, and security policies.
+            Personalize your local assistant persona, UI theme, and interaction preferences.
+            Backend-owned tool availability and policies remain server-controlled.
           </p>
         </div>
 
@@ -202,6 +204,8 @@ export const Settings: React.FC = () => {
                         key={accent.id}
                         type="button"
                         onClick={() => handleUpdate({ accentColor: accent.id as any })}
+                        aria-label={`Use ${accent.id} accent color`}
+                        title={`Use ${accent.id} accent color`}
                         className={`h-7 w-7 rounded-full ${accent.color} transition-transform ${
                           settings.accentColor === accent.id
                             ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-950 scale-110'
@@ -261,7 +265,7 @@ export const Settings: React.FC = () => {
                   <label className="block text-xs font-medium text-slate-300">
                     Streaming Render Speed
                   </label>
-                  <p className="text-[11px] text-slate-500">Simulated typing animation pacing</p>
+                  <p className="text-[11px] text-slate-500">Local animation pacing for streamed responses</p>
                   <div className="mt-2 grid grid-cols-3 gap-3 max-w-md">
                     {(['fast', 'normal', 'relaxed'] as const).map((s) => (
                       <button
@@ -310,39 +314,7 @@ export const Settings: React.FC = () => {
           )}
 
           {/* NOTIFICATIONS TAB */}
-          {activeTab === 'notifications' && (
-            <div className="space-y-6">
-              <h2 className="text-base font-bold text-white">Alerts & Notification Delivery</h2>
-
-              <div className="space-y-4 max-w-md">
-                <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
-                  <div>
-                    <p className="text-xs font-semibold text-slate-200">Desktop Push Notifications</p>
-                    <p className="text-[11px] text-slate-500">Show task and reminder alert banners</p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.desktopPush}
-                    onChange={(e) => handleUpdate({ desktopPush: e.target.checked })}
-                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-500"
-                  />
-                </div>
-
-                <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
-                  <div>
-                    <p className="text-xs font-semibold text-slate-200">Audible Chime Alert</p>
-                    <p className="text-[11px] text-slate-500">Play subtle audio tone when tasks complete</p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={settings.soundAlerts}
-                    onChange={(e) => handleUpdate({ soundAlerts: e.target.checked })}
-                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-500"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
+          {activeTab === 'notifications' && <NotificationPreferencesPanel />}
 
           {/* PRIVACY TAB */}
           {activeTab === 'privacy' && (
@@ -386,7 +358,12 @@ export const Settings: React.FC = () => {
           {/* SECURITY & TOOLS TAB */}
           {activeTab === 'security' && (
             <div className="space-y-6">
-              <h2 className="text-base font-bold text-white">Execution Security & Sandbox Controls</h2>
+              <h2 className="text-base font-bold text-white">Execution Security & Tool Controls</h2>
+
+              <p className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-[11px] leading-relaxed text-slate-400">
+                These switches are local display preferences. Actual tool availability,
+                confirmation requirements, and audit recording are enforced by the backend.
+              </p>
 
               <div className="space-y-4 max-w-md">
                 <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
@@ -426,7 +403,7 @@ export const Settings: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold text-slate-200">Tool Execution Audit Log</p>
-                    <p className="text-[11px] text-slate-500">Record all simulated commands to audit trail</p>
+                    <p className="text-[11px] text-slate-500">Record backend tool executions in the audit history</p>
                   </div>
                   <input
                     type="checkbox"
@@ -450,7 +427,7 @@ export const Settings: React.FC = () => {
                 </div>
                 <div>
                   <h2 className="text-lg font-bold text-white">ASTA – Personal AI Assistant</h2>
-                  <p className="font-mono text-xs text-indigo-300">Phase 14 Desktop Release · v1.4.0</p>
+                  <p className="font-mono text-xs text-indigo-300">Backend-connected assistant workspace</p>
                 </div>
               </div>
 
@@ -467,15 +444,15 @@ export const Settings: React.FC = () => {
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Styling Engine:</span>
-                  <span className="text-slate-200">Tailwind CSS v4 + Obsidian Obsidian Palette</span>
+                  <span className="text-slate-200">Tailwind CSS v4 + Obsidian palette</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Backend Target:</span>
                   <span className="text-slate-200">FastAPI Async · SSE Streaming Protocol</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
-                  <span>Repository Path:</span>
-                  <span className="text-slate-200">c:\Asta</span>
+                  <span>Execution Boundary:</span>
+                  <span className="text-slate-200">Backend-enforced tool policy</span>
                 </div>
               </div>
             </div>

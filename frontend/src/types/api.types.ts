@@ -214,7 +214,8 @@ export type BackendReminderStatus =
   | 'processing'
   | 'delivered'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'suppressed';
 
 export interface ReminderCreate {
   offset_minutes?: number | null;
@@ -389,7 +390,26 @@ export interface ToolConfirmationListResponse {
 
 export interface ToolConfirmationActionResponse {
   confirmation: ToolConfirmationResponse;
-  result?: Record<string, any> | null;
+  result?: ToolResultResponse | null;
+}
+
+export interface ToolMetricsResponse {
+  executions_total: number;
+  success_total: number;
+  failure_total: number;
+  timeout_total: number;
+  cancelled_total: number;
+  provider_failure_total: number;
+  retry_total: number;
+  confirmation_approved_total: number;
+  confirmation_rejected_total: number;
+  duplicate_prevented_total: number;
+  recovery_total: number;
+  duration_samples: number;
+  average_duration_ms?: number | null;
+  max_duration_ms?: number | null;
+  by_tool?: Record<string, Record<string, number>>;
+  since?: string | null;
 }
 
 export interface EmergencyStopResponse {
@@ -397,4 +417,177 @@ export interface EmergencyStopResponse {
   engaged_at?: string | null;
   engaged_by_user_id?: number | null;
   recovery_configured: boolean;
+}
+
+// ==========================================
+// Notifications
+// ==========================================
+export type BackendNotificationType = 'reminder' | 'system';
+export type BackendNotificationDeliveryStatus =
+  | 'pending'
+  | 'delivered'
+  | 'failed';
+
+export interface NotificationResponse {
+  id: number;
+  user_id: number;
+  task_id: number | null;
+  reminder_id: number | null;
+  notification_type: BackendNotificationType;
+  delivery_status: BackendNotificationDeliveryStatus;
+  title: string;
+  body: string;
+  task_title: string | null;
+  reminder_at: string | null;
+  is_read: boolean;
+  read_at: string | null;
+  snoozed_at: string | null;
+  snoozed_until: string | null;
+  snooze_count: number;
+  delivered_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationSnoozeRequest {
+  /** Exactly one of duration_minutes and snooze_until. */
+  duration_minutes?: number;
+  snooze_until?: string; // ISO 8601 with timezone offset
+}
+
+export interface NotificationReadAllResponse {
+  updated: number;
+}
+
+export interface NotificationListQueryParams {
+  unread_only?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface NotificationUnreadQueryParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface NotificationPreferenceUpdate {
+  in_app_enabled?: boolean;
+  quiet_hours_enabled?: boolean;
+  quiet_hours_start?: string; // local wall-clock HH:MM[:SS]
+  quiet_hours_end?: string; // local wall-clock HH:MM[:SS]
+  timezone?: string;
+}
+
+export interface NotificationPreferenceResponse {
+  id: number | null;
+  user_id: number;
+  in_app_enabled: boolean;
+  quiet_hours_enabled: boolean;
+  quiet_hours_start: string; // HH:MM:SS, no timezone
+  quiet_hours_end: string; // HH:MM:SS, no timezone
+  timezone: string;
+  quiet_hours_active: boolean;
+  quiet_hours_ends_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+// ==========================================
+// Recurrences
+// ==========================================
+export type BackendRecurrenceFrequency = 'daily' | 'weekly' | 'monthly';
+
+export interface RecurrenceCreate {
+  frequency: BackendRecurrenceFrequency;
+  interval?: number; // 1..365
+  weekdays?: number[] | null; // 0 = Monday .. 6 = Sunday, weekly only
+  start_date?: string | null; // YYYY-MM-DD, defaults to the task due date
+  end_date?: string | null; // YYYY-MM-DD
+  timezone?: string | null;
+}
+
+export interface RecurrenceUpdate {
+  frequency?: BackendRecurrenceFrequency | null;
+  interval?: number | null;
+  weekdays?: number[] | null;
+  end_date?: string | null;
+  timezone?: string | null;
+  is_active?: boolean | null;
+}
+
+export interface RecurrenceResponse {
+  id: number;
+  user_id: number;
+  task_id: number;
+  frequency: BackendRecurrenceFrequency;
+  interval: number;
+  weekdays: number[];
+  start_date: string; // YYYY-MM-DD
+  end_date: string | null;
+  timezone: string | null;
+  anchor_time: string | null;
+  is_active: boolean;
+  last_generated_date: string | null;
+  next_generation_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecurrenceOccurrenceResponse {
+  id: number;
+  user_id: number;
+  recurrence_id: number | null;
+  task_id: number;
+  occurrence_date: string; // YYYY-MM-DD
+  created_at: string;
+}
+
+export interface RecurrenceListQueryParams {
+  task_id?: number;
+  include_inactive?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface RecurrenceOccurrenceQueryParams {
+  limit?: number;
+  offset?: number;
+}
+
+// ==========================================
+// Background Tasks
+// ==========================================
+export type BackendBackgroundTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * Exact public task representation from `app/api/background_tasks.py`.
+ * Stored handler parameters are deliberately absent, and the backend does not
+ * expose `updated_at` or progress fields.
+ */
+export interface BackgroundTaskResponse {
+  id: number;
+  task_type: string;
+  status: BackendBackgroundTaskStatus;
+  result: Record<string, unknown> | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface BackgroundTaskListResponse {
+  tasks: BackgroundTaskResponse[];
+  total: number;
+}
+
+export interface BackgroundTaskListQueryParams {
+  status?: BackendBackgroundTaskStatus;
+  limit?: number;
+  offset?: number;
 }

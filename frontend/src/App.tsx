@@ -13,6 +13,8 @@ import Home from './pages/Home';
 import Chat from './pages/Chat';
 import Tasks from './pages/Tasks';
 import Reminders from './pages/Reminders';
+import Recurrences from './pages/Recurrences';
+import BackgroundTasks from './pages/BackgroundTasks';
 import Memory from './pages/Memory';
 import Tools from './pages/Tools';
 import SystemMonitor from './pages/SystemMonitor';
@@ -22,8 +24,11 @@ import { useAuthStore } from './stores/auth.store';
 import { useChatStore } from './stores/chat.store';
 import { useTaskStore } from './stores/task.store';
 import { useReminderStore } from './stores/reminder.store';
+import { useRecurrenceStore } from './stores/recurrence.store';
 import { useMemoryStore } from './stores/memory.store';
 import { useToolStore } from './stores/tool.store';
+import { useNotificationStore } from './stores/notification.store';
+import { useBackgroundTaskStore } from './stores/backgroundTask.store';
 
 function pathToSection(pathname: string): NavSectionId {
   const clean = pathname.replace(/^\/+/, '').split('/')[0];
@@ -34,6 +39,10 @@ function pathToSection(pathname: string): NavSectionId {
       return 'tasks';
     case 'reminders':
       return 'reminders';
+    case 'recurrences':
+      return 'recurrences';
+    case 'background-tasks':
+      return 'background-tasks';
     case 'memory':
       return 'memory';
     case 'tools':
@@ -74,12 +83,30 @@ const AppShell: React.FC = () => {
       } catch {
         // Store already preserves the last confirmed data and records the error.
       }
+      try {
+        // Recurrence cards resolve their task titles from the loaded task list.
+        await useRecurrenceStore.getState().fetchRecurrences();
+      } catch {
+        // Store already preserves the last confirmed data and records the error.
+      }
     };
 
     void hydrateTaskDomain();
     useChatStore.getState().loadConversations().catch(() => {});
     useMemoryStore.getState().fetchMemories().catch(() => {});
     useToolStore.getState().fetchTools().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    // Controlled polling: the store serialises requests, starts with an
+    // immediate fetch, and clears its interval on unmount.
+    useNotificationStore.getState().startPolling();
+    useBackgroundTaskStore.getState().startPolling();
+
+    return () => {
+      useNotificationStore.getState().stopPolling();
+      useBackgroundTaskStore.getState().stopPolling();
+    };
   }, []);
 
   const handleNavigate = (section: NavSectionId) => {
@@ -93,6 +120,8 @@ const AppShell: React.FC = () => {
         <Route path="/chat" element={<Chat />} />
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/reminders" element={<Reminders />} />
+        <Route path="/recurrences" element={<Recurrences />} />
+        <Route path="/background-tasks" element={<BackgroundTasks />} />
         <Route path="/memory" element={<Memory />} />
         <Route path="/tools" element={<Tools />} />
         <Route path="/system-monitor" element={<SystemMonitor />} />

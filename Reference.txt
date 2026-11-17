@@ -55,7 +55,7 @@ Phase	Name	Priority
 18	Autonomous AI Agent	Final stage
 
 
-
+..\venv\Scripts\Activate.ps1
 To run backend :
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 
 

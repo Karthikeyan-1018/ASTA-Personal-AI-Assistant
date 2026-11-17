@@ -4,8 +4,10 @@ import {
   MessageSquare,
   CheckSquare,
   Bell,
+  Repeat,
   Brain,
   Wrench,
+  Timer,
   Activity,
   Settings,
   ChevronLeft,
@@ -16,6 +18,10 @@ import {
 } from 'lucide-react';
 import { useTaskStore } from '../../stores/task.store';
 import { useReminderStore } from '../../stores/reminder.store';
+import { useRecurrenceStore } from '../../stores/recurrence.store';
+import { useBackgroundTaskStore } from '../../stores/backgroundTask.store';
+import { isLiveReminder } from '../../types/reminder.types';
+import { isCancellableBackgroundTaskStatus } from '../../utils/backgroundTask';
 import { useMemoryStore } from '../../stores/memory.store';
 import { useAuthStore } from '../../stores/auth.store';
 import { useChatStore } from '../../stores/chat.store';
@@ -25,6 +31,8 @@ export type NavSectionId =
   | 'chat'
   | 'tasks'
   | 'reminders'
+  | 'recurrences'
+  | 'background-tasks'
   | 'memory'
   | 'tools'
   | 'system-monitor'
@@ -49,12 +57,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
 }) => {
   const tasks = useTaskStore((s) => s.tasks);
   const reminders = useReminderStore((s) => s.reminders);
+  const recurrenceRules = useRecurrenceStore((s) => s.rules);
+  const backgroundTasks = useBackgroundTaskStore((s) => s.tasks);
   const memories = useMemoryStore((s) => s.memories);
   const user = useAuthStore((s) => s.user);
   const createNewConversation = useChatStore((s) => s.createNewConversation);
 
   const pendingTasksCount = tasks.filter((t) => !t.completed).length;
-  const activeRemindersCount = reminders.filter((r) => r.active && !r.completed).length;
+  const activeRemindersCount = reminders.filter((r) => isLiveReminder(r.status)).length;
+  const activeRecurrenceCount = recurrenceRules.filter((r) => r.isActive).length;
+  const activeBackgroundTaskCount = backgroundTasks.filter((task) =>
+    isCancellableBackgroundTaskStatus(task.status)
+  ).length;
   const memoryCount = memories.length;
 
   const navItems = [
@@ -73,17 +87,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: activeRemindersCount > 0 ? String(activeRemindersCount) : undefined,
     },
     {
+      id: 'recurrences' as NavSectionId,
+      label: 'Recurrences',
+      icon: Repeat,
+      badge:
+        activeRecurrenceCount > 0 ? String(activeRecurrenceCount) : undefined,
+    },
+    {
       id: 'memory' as NavSectionId,
       label: 'Memory',
       icon: Brain,
       badge: memoryCount > 0 ? String(memoryCount) : undefined,
     },
     { id: 'tools' as NavSectionId, label: 'Tools', icon: Wrench },
+    {
+      id: 'background-tasks' as NavSectionId,
+      label: 'Background Tasks',
+      icon: Timer,
+      badge:
+        activeBackgroundTaskCount > 0
+          ? String(activeBackgroundTaskCount)
+          : undefined,
+    },
     { id: 'system-monitor' as NavSectionId, label: 'System Monitor', icon: Activity },
   ];
 
   const handleNewChat = () => {
-    createNewConversation();
+    void createNewConversation();
     onSelectSection('chat');
     if (mobileOpen) onCloseMobile();
   };
@@ -141,6 +171,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={onToggleCollapse}
               className="hidden rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 lg:flex"
               title="Collapse sidebar"
+              aria-label="Collapse sidebar"
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -156,6 +187,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               collapsed ? 'h-11 px-0' : 'h-11 px-4 text-sm'
             }`}
             title="Start new conversation"
+            aria-label="Start new conversation"
           >
             <Plus className="h-4 w-4 shrink-0 transition-transform group-hover:rotate-90" />
             {!collapsed && <span>New Chat</span>}
@@ -173,7 +205,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 key={item.id}
                 type="button"
                 onClick={() => handleNavClick(item.id)}
-                title={collapsed ? item.label : undefined}
+                title={item.label}
+                aria-label={item.label}
                 className={`group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
                   isActive
                     ? 'border border-indigo-500/30 bg-indigo-500/15 text-indigo-300 shadow-sm shadow-indigo-500/10'
@@ -216,7 +249,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={() => handleNavClick('settings')}
-            title={collapsed ? 'Settings' : undefined}
+            title="Settings"
+            aria-label="Settings"
             className={`group relative flex w-full items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium transition-all ${
               activeSection === 'settings'
                 ? 'border border-indigo-500/30 bg-indigo-500/15 text-indigo-300'
@@ -245,7 +279,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between">
                   <p className="truncate text-xs font-semibold text-slate-200">{user.name}</p>
-                  <span title="Local Security Sandbox Active">
+                  <span
+                    title="Tool sandbox policy is enforced by the backend"
+                    aria-label="Tool sandbox policy is enforced by the backend"
+                  >
                     <ShieldCheck className="h-3.5 w-3.5 text-indigo-400" />
                   </span>
                 </div>
@@ -261,6 +298,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               onClick={onToggleCollapse}
               className="flex w-full items-center justify-center rounded-lg py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
               title="Expand sidebar"
+              aria-label="Expand sidebar"
             >
               <ChevronRight className="h-4 w-4" />
             </button>

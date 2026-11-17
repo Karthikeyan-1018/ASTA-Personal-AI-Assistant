@@ -14,8 +14,6 @@ const DEFAULT_SETTINGS: UserSettings = {
   streamingSpeed: 'fast',
   sendOnEnter: true,
   codeWrap: true,
-  soundAlerts: false,
-  desktopPush: true,
   retentionDays: 30,
   privateModeDefault: false,
   confirmElevatedTools: true,

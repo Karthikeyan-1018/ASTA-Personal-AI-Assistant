@@ -4,120 +4,289 @@ import {
   Bell,
   Clock,
   Calendar,
-  CheckCircle2,
-  Circle,
   Trash2,
   Edit2,
-  Volume2,
   X,
-  Sparkles,
   AlertTriangle,
   RefreshCw,
   Loader2,
+  Ban,
 } from 'lucide-react';
 import { useReminderStore } from '../stores/reminder.store';
-import { useUIStore } from '../stores/ui.store';
-import type { ReminderItem, ReminderCategory, ReminderFrequency } from '../types/reminder.types';
+import { useTaskStore } from '../stores/task.store';
+import {
+  isLiveReminder,
+  type ReminderItem,
+  type ReminderStatus,
+} from '../types/reminder.types';
+import {
+  formatOffsetMinutes,
+  localDateString,
+  localWallClockToUtcIso,
+} from '../utils/reminderTime';
+import {
+  getTaskReminderEligibility,
+  isTaskReminderEligible,
+} from '../utils/reminderEligibility';
 
-function getTodayDateString(): string {
-  return new Date().toISOString().split('T')[0];
-}
+const OFFSET_UNIT_MINUTES = {
+  minutes: 1,
+  hours: 60,
+  days: 1440,
+} as const;
+
+type OffsetUnit = keyof typeof OFFSET_UNIT_MINUTES;
+
+const STATUS_STYLES: Record<ReminderStatus, string> = {
+  pending: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+  processing: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+  delivered: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+  cancelled: 'border-slate-600/40 bg-slate-700/30 text-slate-400',
+  suppressed: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+  failed: 'border-rose-500/30 bg-rose-500/10 text-rose-300',
+};
+
+const STATUS_LABELS: Record<ReminderStatus, string> = {
+  pending: 'Pending',
+  processing: 'Processing',
+  delivered: 'Delivered',
+  cancelled: 'Cancelled',
+  suppressed: 'Suppressed',
+  failed: 'Failed',
+};
 
 export const Reminders: React.FC = () => {
   const reminders = useReminderStore((s) => s.reminders);
   const isLoading = useReminderStore((s) => s.isLoading);
+  const isCreating = useReminderStore((s) => s.isCreating);
+  const mutatingIds = useReminderStore((s) => s.mutatingIds);
   const error = useReminderStore((s) => s.error);
   const fetchReminders = useReminderStore((s) => s.fetchReminders);
-  const addReminder = useReminderStore((s) => s.addReminder);
-  const updateReminder = useReminderStore((s) => s.updateReminder);
+  const createReminder = useReminderStore((s) => s.createReminder);
+  const rescheduleReminder = useReminderStore((s) => s.rescheduleReminder);
+  const cancelReminder = useReminderStore((s) => s.cancelReminder);
   const deleteReminder = useReminderStore((s) => s.deleteReminder);
-  const toggleReminderActive = useReminderStore((s) => s.toggleReminderActive);
-  const toggleReminderCompleted = useReminderStore((s) => s.toggleReminderCompleted);
 
-  const addNotification = useUIStore((s) => s.addNotification);
+  const tasks = useTaskStore((s) => s.tasks);
 
-  const [activeTab, setActiveTab] = useState<'today' | 'upcoming' | 'completed' | 'all'>('today');
+  const [activeTab, setActiveTab] = useState<'today' | 'upcoming' | 'cancelled' | 'all'>('today');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingReminder, setEditingReminder] = useState<ReminderItem | null>(null);
 
-  // Notification Preferences Local State
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const [desktopPushEnabled, setDesktopPushEnabled] = useState(true);
+  const [todayStr] = useState(localDateString);
 
-  const [todayStr] = useState(getTodayDateString);
-
-  // Form State
-  const [formTitle, setFormTitle] = useState('');
-  const [formDesc, setFormDesc] = useState('');
-  const [formDate, setFormDate] = useState(getTodayDateString);
+  // Create form state. Titles and descriptions come from the selected task.
+  const [formTaskId, setFormTaskId] = useState('');
+  const [scheduleMode, setScheduleMode] = useState<'absolute' | 'offset'>('absolute');
+  const [formDate, setFormDate] = useState(localDateString);
   const [formTime, setFormTime] = useState('18:00');
-  const [formCategory, setFormCategory] = useState<ReminderCategory>('Personal');
-  const [formFrequency, setFormFrequency] = useState<ReminderFrequency>('daily');
+  const [offsetValue, setOffsetValue] = useState('30');
+  const [offsetUnit, setOffsetUnit] = useState<OffsetUnit>('minutes');
+
+  // Reschedule form state.
+  const [rescheduleDate, setRescheduleDate] = useState(localDateString);
+  const [rescheduleTime, setRescheduleTime] = useState('18:00');
+
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // The store and the UI share one eligibility rule based on the last
+  // backend-confirmed task status.
+  const confirmedTasks = tasks.filter((t) => t.backendId !== undefined);
+  const reminderTasks = confirmedTasks.filter(isTaskReminderEligible);
+
+  // Resolve from all confirmed tasks so a task that became ineligible while
+  // the form was open can be explained instead of silently disappearing.
+  const selectedTask = confirmedTasks.find(
+    (t) => String(t.backendId) === formTaskId
+  );
+  const selectedEligibility = getTaskReminderEligibility(selectedTask);
+
+  const editingLinkedTask =
+    editingReminder?.taskId === undefined
+      ? undefined
+      : confirmedTasks.find((t) => t.backendId === editingReminder.taskId);
+  const editingEligibility = getTaskReminderEligibility(editingLinkedTask);
 
   const openCreateModal = () => {
+    const firstTask = reminderTasks[0];
+
     setEditingReminder(null);
-    setFormTitle('');
-    setFormDesc('');
-    setFormDate(todayStr);
+    setFormTaskId(firstTask?.backendId !== undefined ? String(firstTask.backendId) : '');
+    setScheduleMode('absolute');
+    setFormDate(localDateString());
     setFormTime('18:00');
-    setFormCategory('Personal');
-    setFormFrequency('daily');
+    setOffsetValue('30');
+    setOffsetUnit('minutes');
+    setFormError(null);
     setModalOpen(true);
   };
 
   const openEditModal = (r: ReminderItem) => {
+    if (r.status !== 'pending') return;
+
     setEditingReminder(r);
-    setFormTitle(r.title);
-    setFormDesc(r.description || '');
-    setFormDate(r.date);
-    setFormTime(r.time);
-    setFormCategory(r.category);
-    setFormFrequency(r.frequency);
+    setRescheduleDate(r.date);
+    setRescheduleTime(r.time);
+    setFormError(null);
     setModalOpen(true);
   };
 
-  const handleFormSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formTitle.trim()) return;
+  const closeModal = () => {
+    if (isCreating) return;
+    setModalOpen(false);
+    setEditingReminder(null);
+    setFormError(null);
+  };
 
-    if (editingReminder) {
-      updateReminder(editingReminder.id, {
-        title: formTitle.trim(),
-        description: formDesc.trim() || undefined,
-        date: formDate,
-        time: formTime,
-        category: formCategory,
-        frequency: formFrequency,
-      });
-    } else {
-      addReminder({
-        title: formTitle.trim(),
-        description: formDesc.trim() || undefined,
-        date: formDate,
-        time: formTime,
-        category: formCategory,
-        frequency: formFrequency,
-        active: true,
-      });
+  const handleCreateReminder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+
+    const taskId = Number(formTaskId);
+
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      setFormError('Choose a saved task to attach this reminder to.');
+      return;
     }
 
-    setModalOpen(false);
+    // Re-check freshly confirmed state at submit time. A task may have been
+    // completed or cancelled after the form was opened.
+    const currentTask = useTaskStore
+      .getState()
+      .tasks.find((t) => t.backendId === taskId);
+    const currentEligibility = getTaskReminderEligibility(currentTask);
+
+    if (!currentEligibility.eligible) {
+      setFormError(
+        currentEligibility.message ||
+          'Reminders can only be scheduled for pending or in-progress tasks.'
+      );
+      return;
+    }
+
+    if (scheduleMode === 'offset' && !selectedTask?.dueDate) {
+      setFormError('The selected task has no deadline. Choose a specific time instead.');
+      return;
+    }
+
+    try {
+      let created = false;
+
+      if (scheduleMode === 'offset') {
+        const value = Number(offsetValue);
+
+        if (!Number.isFinite(value) || value < 0) {
+          setFormError('Offset must be zero or greater.');
+          return;
+        }
+
+        const offsetMinutes = Math.round(value * OFFSET_UNIT_MINUTES[offsetUnit]);
+
+        if (offsetMinutes > 525600) {
+          setFormError('Offset cannot exceed 365 days.');
+          return;
+        }
+
+        created = await createReminder({ taskId, offsetMinutes });
+      } else {
+        // Converts local wall-clock input to a genuine UTC instant.
+        const remindAt = localWallClockToUtcIso(formDate, formTime);
+        created = await createReminder({ taskId, remindAt });
+      }
+
+      if (created) {
+        setModalOpen(false);
+      } else {
+        setFormError(
+          useReminderStore.getState().error ||
+            'Reminder could not be created. No changes were saved.'
+        );
+      }
+    } catch (err: unknown) {
+      setFormError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Select a valid reminder date and time.'
+      );
+    }
   };
 
-  const handleSendTestNotification = () => {
-    addNotification({
-      title: 'ASTA Test Alert',
-      message: 'This is a simulated desktop reminder notification delivered to your workspace.',
-      category: 'reminder',
+  const handleReschedule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingReminder) return;
+
+    setFormError(null);
+
+    const linkedTask = useTaskStore
+      .getState()
+      .tasks.find(
+        (t) =>
+          editingReminder.taskId !== undefined &&
+          (t.backendId === editingReminder.taskId ||
+            t.id === String(editingReminder.taskId))
+      );
+    const eligibility = getTaskReminderEligibility(linkedTask);
+
+    if (!eligibility.eligible) {
+      setFormError(
+        `This reminder cannot be rescheduled. ${eligibility.message || ''}`.trim()
+      );
+      return;
+    }
+
+    try {
+      const remindAt = localWallClockToUtcIso(rescheduleDate, rescheduleTime);
+      const updated = await rescheduleReminder(editingReminder.id, { remindAt });
+
+      if (updated) {
+        setModalOpen(false);
+        setEditingReminder(null);
+      } else {
+        setFormError(
+          useReminderStore.getState().error ||
+            'Reminder could not be rescheduled. Previous values were restored.'
+        );
+      }
+    } catch (err: unknown) {
+      setFormError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Select a valid reminder date and time.'
+      );
+    }
+  };
+
+  const filteredReminders = reminders
+    .map((r) => {
+      // Keep titles live with their linked task, even if the task was renamed
+      // after the reminder list was last fetched.
+      if (r.taskId === undefined) return r;
+      const task = tasks.find(
+        (t) => t.backendId === r.taskId || t.id === String(r.taskId)
+      );
+      return task
+        ? { ...r, title: task.title, description: task.description }
+        : r;
+    })
+    .filter((r) => {
+      if (activeTab === 'today') {
+        return r.date === todayStr && isLiveReminder(r.status);
+      }
+      if (activeTab === 'upcoming') {
+        return r.date > todayStr && isLiveReminder(r.status);
+      }
+      if (activeTab === 'cancelled') {
+        return r.status === 'cancelled';
+      }
+      return true;
     });
-  };
 
-  const filteredReminders = reminders.filter((r) => {
-    if (activeTab === 'today') return r.date === todayStr && !r.completed;
-    if (activeTab === 'upcoming') return (r.date > todayStr || r.frequency !== 'once') && !r.completed;
-    if (activeTab === 'completed') return r.completed;
-    return true;
-  });
+  const isSaving = editingReminder
+    ? mutatingIds.includes(editingReminder.id)
+    : isCreating;
+  const formEligibilityBlocked = editingReminder
+    ? !editingEligibility.eligible
+    : !selectedEligibility.eligible;
 
   return (
     <div className="space-y-6 pb-8">
@@ -128,14 +297,20 @@ export const Reminders: React.FC = () => {
             Reminders & Schedules
           </h1>
           <p className="text-xs sm:text-sm text-slate-400">
-            Automated calendar reminders, routine maintenance triggers, and notifications.
+            Backend-scheduled reminders for your saved tasks.
           </p>
         </div>
 
         <button
           type="button"
           onClick={openCreateModal}
-          className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white shadow-lg shadow-amber-600/25 transition hover:bg-amber-500 active:scale-[0.98]"
+          disabled={reminderTasks.length === 0}
+          title={
+            reminderTasks.length === 0
+              ? 'Create a pending task before scheduling a reminder'
+              : undefined
+          }
+          className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white shadow-lg shadow-amber-600/25 transition hover:bg-amber-500 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Plus className="h-4 w-4" />
           <span>New Reminder</span>
@@ -172,56 +347,9 @@ export const Reminders: React.FC = () => {
         </div>
       )}
 
-      {/* Notification Preferences Bar */}
-      <div className="flex flex-col gap-4 rounded-2xl border border-slate-800/80 bg-slate-900/30 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500/10 text-amber-400">
-            <Bell className="h-4 w-4" />
-          </div>
-          <div>
-            <p className="text-xs font-semibold text-slate-200">Workspace Notification Delivery</p>
-            <p className="text-[11px] text-slate-500">Configure simulated audio cues and desktop banners</p>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={desktopPushEnabled}
-              onChange={(e) => setDesktopPushEnabled(e.target.checked)}
-              className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0"
-            />
-            <span>Desktop Banners</span>
-          </label>
-
-          <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={soundEnabled}
-              onChange={(e) => setSoundEnabled(e.target.checked)}
-              className="rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-0"
-            />
-            <Volume2 className="h-3.5 w-3.5 text-slate-400" />
-            <span>Audio Chime</span>
-          </label>
-
-          <button
-            type="button"
-            onClick={handleSendTestNotification}
-            className="rounded-xl border border-slate-800 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-amber-300 transition hover:bg-slate-800"
-          >
-            <span className="flex items-center gap-1.5">
-              <Sparkles className="h-3 w-3" />
-              Test Toast
-            </span>
-          </button>
-        </div>
-      </div>
-
       {/* Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-        {(['today', 'upcoming', 'completed', 'all'] as const).map((tab) => (
+        {(['today', 'upcoming', 'cancelled', 'all'] as const).map((tab) => (
           <button
             key={tab}
             type="button"
@@ -253,220 +381,381 @@ export const Reminders: React.FC = () => {
               </p>
               <p className="mt-1 text-xs text-slate-500">
                 {reminders.length === 0
-                  ? 'Create a reminder to stay on top of routines and maintenance tasks.'
+                  ? 'Create a reminder for one of your saved tasks.'
                   : 'Try another tab or create a new reminder.'}
               </p>
             </div>
           )
         ) : (
-          filteredReminders.map((r) => (
-            <div
-              key={r.id}
-              className={`flex flex-col justify-between rounded-2xl border p-4.5 transition ${
-                r.completed
-                  ? 'border-slate-800/60 bg-slate-950/40 opacity-60'
-                  : 'border-slate-800/90 bg-slate-900/40 hover:border-amber-500/40 hover:bg-slate-900/70 shadow-lg'
-              }`}
-            >
-              <div>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => toggleReminderCompleted(r.id)}
-                      className="text-slate-500 hover:text-emerald-400 transition"
-                      title={r.completed ? 'Mark pending' : 'Mark completed'}
+          filteredReminders.map((r) => {
+            const isMutating = mutatingIds.includes(r.id);
+            const isTerminal = r.status !== 'pending' && r.status !== 'processing';
+            const linkedTask =
+              r.taskId === undefined
+                ? undefined
+                : tasks.find(
+                    (t) =>
+                      t.backendId === r.taskId || t.id === String(r.taskId)
+                  );
+            const linkedEligibility = getTaskReminderEligibility(linkedTask);
+            const canReschedule =
+              r.status === 'pending' && linkedEligibility.eligible;
+
+            return (
+              <div
+                key={r.id}
+                className={`flex flex-col justify-between rounded-2xl border p-4.5 transition ${
+                  isTerminal
+                    ? 'border-slate-800/60 bg-slate-950/40 opacity-70'
+                    : 'border-slate-800/90 bg-slate-900/40 hover:border-amber-500/40 hover:bg-slate-900/70 shadow-lg'
+                }`}
+              >
+                <div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-2.5">
+                      <Bell className="h-4 w-4 shrink-0 text-amber-400" />
+                      <h3 className="truncate text-sm font-bold text-slate-100">
+                        {r.title}
+                      </h3>
+                    </div>
+
+                    <span
+                      className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${STATUS_STYLES[r.status]}`}
                     >
-                      {r.completed ? (
-                        <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-                      ) : (
-                        <Circle className="h-5 w-5" />
-                      )}
-                    </button>
-                    <h3
-                      className={`text-sm font-bold truncate ${
-                        r.completed ? 'text-slate-500 line-through' : 'text-slate-100'
-                      }`}
-                    >
-                      {r.title}
-                    </h3>
+                      {STATUS_LABELS[r.status]}
+                    </span>
                   </div>
 
-                  {/* Active Switch */}
-                  <button
-                    type="button"
-                    onClick={() => toggleReminderActive(r.id)}
-                    className={`h-5 w-9 rounded-full transition-colors relative p-0.5 ${
-                      r.active ? 'bg-amber-600' : 'bg-slate-800'
-                    }`}
-                    title={r.active ? 'Deactivate' : 'Activate'}
-                  >
-                    <span
-                      className={`block h-4 w-4 rounded-full bg-white transition-transform ${
-                        r.active ? 'translate-x-4' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
+                  {r.description && (
+                    <p className="mt-2 text-xs text-slate-400 leading-relaxed pl-6.5">
+                      {r.description}
+                    </p>
+                  )}
                 </div>
 
-                {r.description && (
-                  <p className="mt-2 text-xs text-slate-400 leading-relaxed pl-7.5">
-                    {r.description}
+                {/* Card Meta & Controls */}
+                <div className="mt-4 flex items-center justify-between border-t border-slate-800/60 pt-3 text-[11px] text-slate-500">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="flex items-center gap-1 font-mono text-amber-300 font-semibold">
+                      <Clock className="h-3 w-3" />
+                      {r.time}
+                    </span>
+                    <span>·</span>
+                    <span className="flex items-center gap-1 font-mono">
+                      <Calendar className="h-3 w-3 text-slate-500" />
+                      {r.date}
+                    </span>
+                    <span>·</span>
+                    <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
+                      {typeof r.offsetMinutes === 'number'
+                        ? formatOffsetMinutes(r.offsetMinutes)
+                        : 'At set time'}
+                    </span>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1">
+                    {canReschedule && (
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(r)}
+                        disabled={isMutating}
+                        className="rounded p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Reschedule"
+                      >
+                        <Edit2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {r.status === 'pending' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void cancelReminder(r.id);
+                        }}
+                        disabled={isMutating}
+                        className="rounded p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Cancel reminder"
+                      >
+                        <Ban className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void deleteReminder(r.id);
+                      }}
+                      disabled={isMutating}
+                      className="rounded p-1.5 text-slate-400 transition hover:bg-slate-800 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Delete reminder"
+                    >
+                      {isMutating ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {r.status === 'cancelled' && (
+                  <p className="mt-2 text-[10px] text-slate-500">
+                    Cancelled reminders cannot be reactivated. Create a new reminder instead.
+                  </p>
+                )}
+                {r.status === 'pending' && !linkedEligibility.eligible && (
+                  <p className="mt-2 text-[10px] text-amber-300/80">
+                    This reminder cannot be rescheduled. {linkedEligibility.message}
                   </p>
                 )}
               </div>
-
-              {/* Card Meta & Controls */}
-              <div className="mt-4 flex items-center justify-between border-t border-slate-800/60 pt-3 text-[11px] text-slate-500">
-                <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-1 font-mono text-amber-300 font-semibold">
-                    <Clock className="h-3 w-3" />
-                    {r.time}
-                  </span>
-                  <span>·</span>
-                  <span className="flex items-center gap-1 font-mono">
-                    <Calendar className="h-3 w-3 text-slate-500" />
-                    {r.date}
-                  </span>
-                  <span>·</span>
-                  <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400 capitalize">
-                    {r.frequency}
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => openEditModal(r)}
-                    className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                    title="Edit"
-                  >
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => deleteReminder(r.id)}
-                    className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-rose-400"
-                    title="Delete"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
-      {/* Create / Edit Reminder Modal */}
+      {/* Create / Reschedule Reminder Modal */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reminder-form-title"
+        >
           <div className="relative w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-              <h2 className="text-base font-bold text-white">
-                {editingReminder ? 'Edit Reminder' : 'New Reminder'}
+              <h2 id="reminder-form-title" className="text-base font-bold text-white">
+                {editingReminder ? 'Reschedule Reminder' : 'New Reminder'}
               </h2>
               <button
                 type="button"
-                onClick={() => setModalOpen(false)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                onClick={closeModal}
+                disabled={isSaving}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-50"
+                aria-label="Close reminder form"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <form onSubmit={handleFormSubmit} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300">Title *</label>
-                <input
-                  type="text"
-                  required
-                  value={formTitle}
-                  onChange={(e) => setFormTitle(e.target.value)}
-                  placeholder="e.g. Daily system diagnostic snapshot"
-                  className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-3 text-xs text-white placeholder-slate-500 focus:border-amber-500/60 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300">Description</label>
-                <textarea
-                  rows={2}
-                  value={formDesc}
-                  onChange={(e) => setFormDesc(e.target.value)}
-                  placeholder="Optional reminder details..."
-                  className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-900 p-3 text-xs text-white placeholder-slate-500 focus:border-amber-500/60 focus:outline-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-300">Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={formDate}
-                    onChange={(e) => setFormDate(e.target.value)}
-                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-white focus:outline-none"
-                  />
+            <form
+              onSubmit={
+                editingReminder ? handleReschedule : handleCreateReminder
+              }
+              className="mt-4 space-y-4"
+            >
+              {editingReminder ? (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    Linked task
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-slate-100">
+                    {editingReminder.title}
+                  </p>
+                  {editingReminder.offsetMinutes !== null &&
+                    editingReminder.offsetMinutes !== undefined && (
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        Currently {formatOffsetMinutes(editingReminder.offsetMinutes)}
+                      </p>
+                    )}
+                  {!editingEligibility.eligible && (
+                    <p
+                      role="alert"
+                      className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-200"
+                    >
+                      This reminder cannot be rescheduled.{' '}
+                      {editingEligibility.message}
+                    </p>
+                  )}
                 </div>
+              ) : (
+                <>
+                  <div>
+                    <label htmlFor="reminder-form-task" className="block text-xs font-medium text-slate-300">
+                      Task *
+                    </label>
+                    <select
+                      id="reminder-form-task"
+                      required
+                      value={formTaskId}
+                      onChange={(e) => {
+                        setFormTaskId(e.target.value);
+                        setFormError(null);
+                      }}
+                      className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:border-amber-500/60 focus:outline-none"
+                    >
+                      <option value="">Select a saved task</option>
+                      {reminderTasks.map((task) => (
+                        <option key={task.backendId} value={task.backendId}>
+                          {task.title}
+                        </option>
+                      ))}
+                      {selectedTask && !selectedEligibility.eligible && (
+                        <option value={formTaskId} disabled>
+                          {selectedTask.title} (no longer eligible)
+                        </option>
+                      )}
+                    </select>
+                    {reminderTasks.length === 0 && (
+                      <p className="mt-1 text-[11px] text-amber-300/80">
+                        Create a pending or in-progress task before scheduling a
+                        reminder.
+                      </p>
+                    )}
+                    {selectedTask && !selectedEligibility.eligible && (
+                      <p
+                        role="alert"
+                        className="mt-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-200"
+                      >
+                        {selectedEligibility.message} Choose another pending or
+                        in-progress task.
+                      </p>
+                    )}
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300">Time</label>
-                  <input
-                    type="time"
-                    required
-                    value={formTime}
-                    onChange={(e) => setFormTime(e.target.value)}
-                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-white focus:outline-none"
-                  />
-                </div>
-              </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300">
+                      Schedule
+                    </label>
+                    <div className="mt-1 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setScheduleMode('absolute')}
+                        className={`flex-1 rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                          scheduleMode === 'absolute'
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                            : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Specific time
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setScheduleMode('offset')}
+                        disabled={!selectedTask?.dueDate}
+                        title={
+                          !selectedTask?.dueDate
+                            ? 'The selected task has no deadline'
+                            : undefined
+                        }
+                        className={`flex-1 rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                          scheduleMode === 'offset'
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                            : 'border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Before deadline
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
 
-              <div className="grid grid-cols-2 gap-3">
+              {(!editingReminder && scheduleMode === 'offset') ? (
                 <div>
-                  <label className="block text-xs font-medium text-slate-300">Category</label>
-                  <select
-                    value={formCategory}
-                    onChange={(e) => setFormCategory(e.target.value as ReminderCategory)}
-                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
-                  >
-                    <option value="System">System</option>
-                    <option value="Maintenance">Maintenance</option>
-                    <option value="Personal">Personal</option>
-                    <option value="Workflow">Workflow</option>
-                    <option value="Work">Work</option>
-                  </select>
-                </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300">
+                        Offset
+                      </label>
+                      <input
+                        type="number"
+                        required
+                        min={0}
+                        step={1}
+                        value={offsetValue}
+                        onChange={(e) => setOffsetValue(e.target.value)}
+                        className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-3 text-xs text-white focus:border-amber-500/60 focus:outline-none"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300">Frequency</label>
-                  <select
-                    value={formFrequency}
-                    onChange={(e) => setFormFrequency(e.target.value as ReminderFrequency)}
-                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
-                  >
-                    <option value="once">Once</option>
-                    <option value="daily">Daily</option>
-                    <option value="weekdays">Weekdays</option>
-                    <option value="weekly">Weekly</option>
-                  </select>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300">
+                        Unit
+                      </label>
+                      <select
+                        value={offsetUnit}
+                        onChange={(e) => setOffsetUnit(e.target.value as OffsetUnit)}
+                        className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
+                      >
+                        <option value="minutes">Minutes</option>
+                        <option value="hours">Hours</option>
+                        <option value="days">Days</option>
+                      </select>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Reminder is resolved from the task deadline
+                    {selectedTask?.dueDate ? ` (${selectedTask.dueDate})` : ''} in
+                    its own timezone.
+                  </p>
                 </div>
-              </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="reminder-form-date" className="block text-xs font-medium text-slate-300">
+                      Date
+                    </label>
+                    <input
+                      id="reminder-form-date"
+                      type="date"
+                      required
+                      value={editingReminder ? rescheduleDate : formDate}
+                      onChange={(e) =>
+                        editingReminder
+                          ? setRescheduleDate(e.target.value)
+                          : setFormDate(e.target.value)
+                      }
+                      className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="reminder-form-time" className="block text-xs font-medium text-slate-300">
+                      Time
+                    </label>
+                    <input
+                      id="reminder-form-time"
+                      type="time"
+                      required
+                      value={editingReminder ? rescheduleTime : formTime}
+                      onChange={(e) =>
+                        editingReminder
+                          ? setRescheduleTime(e.target.value)
+                          : setFormTime(e.target.value)
+                      }
+                      className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-white focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {formError && (
+                <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                  {formError}
+                </p>
+              )}
 
               <div className="mt-6 flex justify-end gap-2.5 border-t border-slate-800 pt-4">
                 <button
                   type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="rounded-xl border border-slate-800 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800"
+                  onClick={closeModal}
+                  disabled={isSaving}
+                  className="rounded-xl border border-slate-800 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500"
+                  disabled={isSaving || formEligibilityBlocked}
+                  className="inline-flex items-center gap-2 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {editingReminder ? 'Save Changes' : 'Create Reminder'}
+                  {isSaving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {editingReminder
+                    ? isSaving
+                      ? 'Saving…'
+                      : 'Save Time'
+                    : isSaving
+                      ? 'Creating…'
+                      : 'Create Reminder'}
                 </button>
               </div>
             </form>

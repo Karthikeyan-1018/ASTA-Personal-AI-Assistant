@@ -13,9 +13,15 @@ import {
   AlertTriangle,
   RefreshCw,
   Loader2,
+  Ban,
 } from 'lucide-react';
 import { useTaskStore } from '../stores/task.store';
 import type { TaskItem, TaskPriority, TaskCategory, TaskStatus } from '../types/task.types';
+import {
+  TASK_STATUS_LABELS,
+  confirmedTaskStatus,
+  isTaskCancellable,
+} from '../utils/taskStatus';
 
 export const Tasks: React.FC = () => {
   const tasks = useTaskStore((s) => s.tasks);
@@ -29,10 +35,14 @@ export const Tasks: React.FC = () => {
   const updateTask = useTaskStore((s) => s.updateTask);
   const deleteTask = useTaskStore((s) => s.deleteTask);
   const toggleTaskCompleted = useTaskStore((s) => s.toggleTaskCompleted);
+  const cancelTask = useTaskStore((s) => s.cancelTask);
+  const mutatingIds = useTaskStore((s) => s.mutatingIds);
   const clearCompleted = useTaskStore((s) => s.clearCompleted);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskItem | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<TaskItem | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   // Form state
   const [formTitle, setFormTitle] = useState('');
@@ -64,6 +74,36 @@ export const Tasks: React.FC = () => {
     setModalOpen(true);
   };
 
+  const openCancelDialog = (task: TaskItem) => {
+    setCancelTarget(task);
+    setCancelError(null);
+  };
+
+  const closeCancelDialog = () => {
+    if (cancelTarget && mutatingIds.includes(cancelTarget.id)) return;
+    setCancelTarget(null);
+    setCancelError(null);
+  };
+
+  const handleConfirmCancel = async () => {
+    if (!cancelTarget) return;
+
+    const targetId = cancelTarget.id;
+    const confirmed = await cancelTask(targetId);
+
+    if (confirmed) {
+      setCancelTarget(null);
+      setCancelError(null);
+      return;
+    }
+
+    // Keep the dialog open with the actual backend error and allow Retry.
+    setCancelError(
+      useTaskStore.getState().error ||
+        'Task could not be cancelled. Previous status was preserved.'
+    );
+  };
+
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formTitle.trim()) return;
@@ -90,6 +130,10 @@ export const Tasks: React.FC = () => {
 
     setModalOpen(false);
   };
+
+  const editingStatus = editingTask ? confirmedTaskStatus(editingTask) : null;
+  const statusLocked =
+    editingStatus === 'cancelled' || editingStatus === 'unknown';
 
   // Filter logic
   const filteredTasks = tasks.filter((t) => {
@@ -209,7 +253,7 @@ export const Tasks: React.FC = () => {
       <div className="flex flex-col gap-3 rounded-2xl border border-slate-800/80 bg-slate-900/30 p-4 lg:flex-row lg:items-center lg:justify-between">
         {/* Status Tabs */}
         <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800/80 pb-3 lg:border-b-0 lg:pb-0">
-          {(['all', 'pending', 'in_progress', 'completed'] as const).map((tab) => (
+          {(['all', 'pending', 'in_progress', 'completed', 'cancelled'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -322,133 +366,185 @@ export const Tasks: React.FC = () => {
             </div>
           )
         ) : (
-          filteredTasks.map((task) => (
-            <div
-              key={task.id}
-              className={`group flex flex-col justify-between gap-4 rounded-2xl border p-4 transition sm:flex-row sm:items-center ${
-                task.completed
-                  ? 'border-slate-800/60 bg-slate-950/40 opacity-70'
-                  : 'border-slate-800/90 bg-slate-900/50 hover:border-indigo-500/40 hover:bg-slate-900/80 shadow-md'
-              }`}
-            >
-              {/* Checkbox & Task details */}
-              <div className="flex items-start gap-3.5 min-w-0 flex-1">
-                <button
-                  type="button"
-                  onClick={() => toggleTaskCompleted(task.id)}
-                  className="mt-0.5 shrink-0 text-slate-500 hover:text-emerald-400 transition"
-                  title={task.completed ? 'Mark incomplete' : 'Mark complete'}
-                >
-                  {task.completed ? (
-                    <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-                  ) : (
-                    <Circle className="h-5 w-5" />
-                  )}
-                </button>
+          filteredTasks.map((task) => {
+            const confirmedStatus = confirmedTaskStatus(task);
+            const canToggleComplete =
+              confirmedStatus !== 'cancelled' && confirmedStatus !== 'unknown';
+            const isMutating = mutatingIds.includes(task.id);
+            const dimmed =
+              task.completed ||
+              confirmedStatus === 'cancelled' ||
+              confirmedStatus === 'unknown';
 
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`text-sm font-semibold truncate ${
-                        task.completed ? 'text-slate-500 line-through' : 'text-slate-100'
-                      }`}
-                    >
-                      {task.title}
-                    </span>
+            return (
+              <div
+                key={task.id}
+                className={`group flex flex-col justify-between gap-4 rounded-2xl border p-4 transition sm:flex-row sm:items-center ${
+                  dimmed
+                    ? 'border-slate-800/60 bg-slate-950/40 opacity-70'
+                    : 'border-slate-800/90 bg-slate-900/50 hover:border-indigo-500/40 hover:bg-slate-900/80 shadow-md'
+                }`}
+              >
+                {/* Checkbox & Task details */}
+                <div className="flex items-start gap-3.5 min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => toggleTaskCompleted(task.id)}
+                    disabled={!canToggleComplete || isMutating}
+                    className="mt-0.5 shrink-0 text-slate-500 hover:text-emerald-400 transition disabled:cursor-not-allowed disabled:opacity-40"
+                    title={
+                      !canToggleComplete
+                        ? 'Status cannot be changed'
+                        : task.completed
+                        ? 'Mark incomplete'
+                        : 'Mark complete'
+                    }
+                  >
+                    {task.completed ? (
+                      <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+                    ) : (
+                      <Circle className="h-5 w-5" />
+                    )}
+                  </button>
 
-                    {/* Priority badge */}
-                    <span
-                      className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                        task.priority === 'critical'
-                          ? 'border border-rose-500/40 bg-rose-500/15 text-rose-300'
-                          : task.priority === 'high'
-                          ? 'border border-amber-500/40 bg-amber-500/15 text-amber-300'
-                          : task.priority === 'medium'
-                          ? 'border border-indigo-500/30 bg-indigo-500/10 text-indigo-300'
-                          : 'border border-slate-700 bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {task.priority}
-                    </span>
-
-                    {/* Status badge */}
-                    <span
-                      className={`rounded-md px-2 py-0.5 text-[10px] font-medium capitalize ${
-                        task.status === 'in_progress'
-                          ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                          : task.status === 'completed'
-                          ? 'bg-emerald-500/15 text-emerald-300'
-                          : 'bg-slate-800 text-slate-400'
-                      }`}
-                    >
-                      {task.status.replace('_', ' ')}
-                    </span>
-                  </div>
-
-                  {task.description && (
-                    <p className="mt-1 text-xs text-slate-400 leading-relaxed line-clamp-2">
-                      {task.description}
-                    </p>
-                  )}
-
-                  {/* Tags and Due Date footer */}
-                  <div className="mt-2.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
-                    <span className="rounded bg-slate-800/80 px-2 py-0.5 font-medium text-slate-300">
-                      {task.category}
-                    </span>
-
-                    {task.dueDate && (
-                      <span className="flex items-center gap-1 font-mono">
-                        <Calendar className="h-3 w-3 text-slate-400" />
-                        Due {task.dueDate}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`text-sm font-semibold truncate ${
+                          task.completed
+                            ? 'text-slate-500 line-through'
+                            : confirmedStatus === 'cancelled'
+                            ? 'text-slate-400'
+                            : 'text-slate-100'
+                        }`}
+                      >
+                        {task.title}
                       </span>
+
+                      {/* Priority badge */}
+                      <span
+                        className={`rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                          task.priority === 'critical'
+                            ? 'border border-rose-500/40 bg-rose-500/15 text-rose-300'
+                            : task.priority === 'high'
+                            ? 'border border-amber-500/40 bg-amber-500/15 text-amber-300'
+                            : task.priority === 'medium'
+                            ? 'border border-indigo-500/30 bg-indigo-500/10 text-indigo-300'
+                            : 'border border-slate-700 bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {task.priority}
+                      </span>
+
+                      {/* Status badge: explicit label for every supported status */}
+                      <span
+                        className={`rounded-md px-2 py-0.5 text-[10px] font-medium ${
+                          task.status === 'in_progress'
+                            ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                            : task.status === 'completed'
+                            ? 'bg-emerald-500/15 text-emerald-300'
+                            : task.status === 'cancelled'
+                            ? 'border border-rose-500/30 bg-rose-500/10 text-rose-300'
+                            : task.status === 'unknown'
+                            ? 'border border-amber-500/30 bg-amber-500/10 text-amber-300'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {TASK_STATUS_LABELS[task.status]}
+                      </span>
+                    </div>
+
+                    {task.description && (
+                      <p className="mt-1 text-xs text-slate-400 leading-relaxed line-clamp-2">
+                        {task.description}
+                      </p>
                     )}
 
-                    {task.tags?.map((t) => (
-                      <span key={t} className="font-mono text-slate-500">
-                        #{t}
+                    {/* Tags and Due Date footer */}
+                    <div className="mt-2.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+                      <span className="rounded bg-slate-800/80 px-2 py-0.5 font-medium text-slate-300">
+                        {task.category}
                       </span>
-                    ))}
+
+                      {task.dueDate && (
+                        <span className="flex items-center gap-1 font-mono">
+                          <Calendar className="h-3 w-3 text-slate-400" />
+                          Due {task.dueDate}
+                        </span>
+                      )}
+
+                      {task.tags?.map((t) => (
+                        <span key={t} className="font-mono text-slate-500">
+                          #{t}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Actions */}
-              <div className="flex items-center justify-end gap-1.5 shrink-0 border-t border-slate-800/60 pt-2 sm:border-t-0 sm:pt-0">
-                <button
-                  type="button"
-                  onClick={() => openEditModal(task)}
-                  className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-slate-200"
-                  title="Edit task"
-                >
-                  <Edit2 className="h-4 w-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => deleteTask(task.id)}
-                  className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-rose-400"
-                  title="Delete task"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {/* Actions */}
+                <div className="flex items-center justify-end gap-1.5 shrink-0 border-t border-slate-800/60 pt-2 sm:border-t-0 sm:pt-0">
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(task)}
+                    disabled={isMutating}
+                    className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Edit task"
+                    aria-label={`Edit task ${task.title}`}
+                  >
+                    <Edit2 className="h-4 w-4" />
+                  </button>
+                  {isTaskCancellable(task) && (
+                    <button
+                      type="button"
+                      onClick={() => openCancelDialog(task)}
+                      disabled={isMutating}
+                      aria-label="Cancel task"
+                      title={isMutating ? 'Cancelling task' : 'Cancel task'}
+                      className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {isMutating ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Ban className="h-4 w-4" />
+                      )}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => deleteTask(task.id)}
+                    disabled={isMutating}
+                    className="rounded-xl p-2 text-slate-400 transition hover:bg-slate-800 hover:text-rose-400 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Delete task"
+                    aria-label={`Delete task ${task.title}`}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
 
       {/* Modal: Create / Edit Task */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="task-form-title"
+        >
           <div className="relative w-full max-w-lg rounded-3xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-800 pb-4">
-              <h2 className="text-base font-bold text-white">
+              <h2 id="task-form-title" className="text-base font-bold text-white">
                 {editingTask ? 'Edit Task' : 'Create New Task'}
               </h2>
               <button
                 type="button"
                 onClick={() => setModalOpen(false)}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                aria-label="Close task form"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -456,8 +552,9 @@ export const Tasks: React.FC = () => {
 
             <form onSubmit={handleFormSubmit} className="mt-4 space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-300">Task Title *</label>
+                <label htmlFor="task-form-title-input" className="block text-xs font-medium text-slate-300">Task Title *</label>
                 <input
+                  id="task-form-title-input"
                   type="text"
                   required
                   value={formTitle}
@@ -468,8 +565,9 @@ export const Tasks: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300">Description</label>
+                <label htmlFor="task-form-description" className="block text-xs font-medium text-slate-300">Description</label>
                 <textarea
+                  id="task-form-description"
                   rows={3}
                   value={formDesc}
                   onChange={(e) => setFormDesc(e.target.value)}
@@ -480,8 +578,9 @@ export const Tasks: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300">Category</label>
+                  <label htmlFor="task-form-category" className="block text-xs font-medium text-slate-300">Category</label>
                   <select
+                    id="task-form-category"
                     value={formCategory}
                     onChange={(e) => setFormCategory(e.target.value as TaskCategory)}
                     className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
@@ -496,8 +595,9 @@ export const Tasks: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300">Priority</label>
+                  <label htmlFor="task-form-priority" className="block text-xs font-medium text-slate-300">Priority</label>
                   <select
+                    id="task-form-priority"
                     value={formPriority}
                     onChange={(e) => setFormPriority(e.target.value as TaskPriority)}
                     className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
@@ -512,21 +612,34 @@ export const Tasks: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300">Status</label>
+                  <label htmlFor="task-form-status" className="block text-xs font-medium text-slate-300">Status</label>
                   <select
+                    id="task-form-status"
                     value={formStatus}
                     onChange={(e) => setFormStatus(e.target.value as TaskStatus)}
-                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none"
+                    disabled={statusLocked}
+                    className="mt-1 h-10 w-full rounded-xl border border-slate-800 bg-slate-900 px-2.5 text-xs text-slate-200 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <option value="pending">Pending</option>
                     <option value="in_progress">In Progress</option>
                     <option value="completed">Completed</option>
+                    {statusLocked && editingStatus && (
+                      <option value={editingStatus}>
+                        {TASK_STATUS_LABELS[editingStatus]}
+                      </option>
+                    )}
                   </select>
+                  {statusLocked && (
+                    <p className="mt-1 text-[10px] text-slate-500">
+                      Status is fixed by the backend for this task.
+                    </p>
+                  )}
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-300">Due Date</label>
+                  <label htmlFor="task-form-due-date" className="block text-xs font-medium text-slate-300">Due Date</label>
                   <input
+                    id="task-form-due-date"
                     type="date"
                     value={formDueDate}
                     onChange={(e) => setFormDueDate(e.target.value)}
@@ -551,6 +664,76 @@ export const Tasks: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation dialog: cancellation never happens from the card alone */}
+      {cancelTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-task-title"
+        >
+          <div className="relative w-full max-w-md rounded-3xl border border-slate-800 bg-slate-950 p-6 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-2 text-rose-300">
+                <Ban className="h-4 w-4" />
+              </div>
+              <div>
+                <h2
+                  id="cancel-task-title"
+                  className="text-base font-bold text-white"
+                >
+                  Cancel task
+                </h2>
+                <p className="mt-1 text-xs text-slate-300">
+                  Cancel <span className="font-semibold">{cancelTarget.title}</span>?
+                </p>
+              </div>
+            </div>
+
+            <p className="mt-4 text-[11px] leading-relaxed text-slate-400">
+              The backend will record this task as cancelled. Existing reminders
+              are refreshed from the backend, not deleted locally. Cancelled
+              tasks cannot receive new reminders.
+            </p>
+
+            {cancelError && (
+              <p
+                role="alert"
+                className="mt-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200"
+              >
+                {cancelError}
+              </p>
+            )}
+
+            <div className="mt-6 flex justify-end gap-2.5 border-t border-slate-800 pt-4">
+              <button
+                type="button"
+                onClick={closeCancelDialog}
+                disabled={mutatingIds.includes(cancelTarget.id)}
+                className="rounded-xl border border-slate-800 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Keep task
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleConfirmCancel();
+                }}
+                disabled={mutatingIds.includes(cancelTarget.id)}
+                className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {mutatingIds.includes(cancelTarget.id) ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : null}
+                {mutatingIds.includes(cancelTarget.id)
+                  ? 'Cancelling…'
+                  : 'Cancel task'}
+              </button>
+            </div>
           </div>
         </div>
       )}
