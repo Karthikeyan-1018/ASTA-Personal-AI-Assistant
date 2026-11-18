@@ -13,6 +13,7 @@ starlette==1.10.0
 uvicorn==0.54.0
 pydantic==2.14.2
 python-dotenv==1.2.4
+python-multipart==0.0.34
 
 # PostgreSQL, async SQLAlchemy, migrations, and pgvector
 SQLAlchemy==2.1.8
@@ -28,6 +29,23 @@ argon2-cffi==25.1.0
 groq==1.7.0
 ollama==0.6.3
 httpx==0.28.1
+
+# Local CPU text-to-speech. The verified voice model is stored outside the
+# repository at %USERPROFILE%\.asta\tts\voices and is installed separately.
+piper-tts==1.8.0
+
+# Local CPU speech-to-text. The verified model is stored outside the repository
+# at %USERPROFILE%\.asta\stt\models and is downloaded once during setup.
+# PyAV is pinned below 19: PyAV 19 removed an av.open argument still used by
+# the current faster-whisper release.
+faster-whisper==1.2.1
+ctranslate2==4.9.0
+av==18.1.0
+
+# Local CPU voice activity detection. The Silero TorchScript model is bundled
+# inside this wheel, so runtime inference needs no model download and no audio
+# extras. It reuses the pinned torch stack below.
+silero-vad==6.2.3
 
 # Semantic memory embeddings. This pulls a large ML stack (PyTorch,
 # Transformers, NumPy, SciPy, scikit-learn). See README.md for the optional

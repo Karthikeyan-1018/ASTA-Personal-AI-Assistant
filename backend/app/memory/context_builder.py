@@ -381,7 +381,8 @@ def build_chat_prompt(
     history: Iterable | None = None,
     preferences: Iterable[RetrievedPreference] | None = None,
     task_context: Iterable[str] | None = None,
-    deadline_context: Iterable[str] | None = None
+    deadline_context: Iterable[str] | None = None,
+    persona_instructions: str | None = None
 ) -> str:
     """Build a chat prompt from separated, untrusted context sources.
 
@@ -389,6 +390,11 @@ def build_chat_prompt(
     conversation history, then structured task/deadline context. The current
     user message is always last and is never truncated. Without any context the
     plain message is returned, preserving the original behaviour.
+
+    ``persona_instructions`` is trusted system text produced by the shared
+    personality engine. It is optional so direct builder tests and legacy
+    callers keep their exact prompt contract; real chat, streaming, and voice
+    paths always supply it.
     """
 
     cleaned_message = user_message.strip()
@@ -423,18 +429,28 @@ def build_chat_prompt(
         if section
     ]
 
-    if not context_sections:
-        return cleaned_message
-
     escaped_message = _escape_untrusted(cleaned_message)
 
     current_message_block = (
-        "CURRENT USER MESSAGE (untrusted data):\n"
+        "CURRENT USER MESSAGE (active user request):\n"
         "<user_message>\n"
         f"{escaped_message}\n"
         "</user_message>"
     )
 
-    sections = [SYSTEM_INSTRUCTIONS, *context_sections, current_message_block]
+    persona = (
+        persona_instructions.strip()
+        if persona_instructions and persona_instructions.strip()
+        else None
+    )
+
+    if not context_sections:
+        if persona:
+            return f"{persona}\n\n{current_message_block}"
+
+        return cleaned_message
+
+    system_block = persona or SYSTEM_INSTRUCTIONS
+    sections = [system_block, *context_sections, current_message_block]
 
     return "\n\n".join(sections)

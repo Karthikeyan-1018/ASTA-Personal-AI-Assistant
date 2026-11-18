@@ -591,3 +591,161 @@ export interface BackgroundTaskListQueryParams {
   limit?: number;
   offset?: number;
 }
+
+// ==========================================
+// Local Text-to-Speech (Phase 18 Stage 1)
+// ==========================================
+export interface TTSStatusResponse {
+  enabled: boolean;
+  available: boolean;
+  voice: string;
+  max_text_chars: number;
+}
+
+export interface TTSSynthesizeRequest {
+  text: string;
+}
+
+// ==========================================
+// Local Speech-to-Text (Phase 18 Stage 2)
+// ==========================================
+export interface STTTranscribeResponse {
+  success: boolean;
+  text: string;
+  language: string | null;
+  processing_ms: number | null;
+}
+
+export interface STTStatusResponse {
+  enabled: boolean;
+  available: boolean;
+  model: string;
+  device: string;
+  compute_type: string;
+  max_upload_bytes: number;
+  max_duration_seconds: number;
+  supported_media_types: string[];
+}
+
+// ==========================================
+// Local Voice Activity Detection (Phase 18 Stage 3)
+// ==========================================
+export interface VADStatusResponse {
+  enabled: boolean;
+  available: boolean;
+  engine: string;
+  engine_version: string;
+  model_name: string;
+  device: string;
+  sample_rate: number;
+  frame_samples: number;
+  speech_threshold: number;
+  silence_threshold: number;
+  min_speech_duration_seconds: number;
+  silence_duration_seconds: number;
+  max_utterance_seconds: number;
+  max_session_seconds: number;
+  max_session_count: number;
+  max_upload_bytes: number;
+}
+
+export interface VADSessionResponse {
+  session_id: string;
+  state: string;
+  sample_rate: number;
+  frame_samples: number;
+  sample_position: number;
+}
+
+export interface VADSegmentSummary {
+  segment_id: string;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+  reason: string;
+  peak_probability: number;
+}
+
+export interface VADFrameResponse {
+  session_id: string;
+  state: string;
+  speech_probability: number;
+  speech_detected: boolean;
+  events: string[];
+  completed_segments: VADSegmentSummary[];
+  sample_position: number;
+  processing_ms: number;
+}
+
+// ==========================================
+// Local Voice Conversation Manager (Phase 18 Stage 4)
+// ==========================================
+export type VoiceConversationState =
+  | 'idle'
+  | 'listening'
+  | 'speech_detected'
+  | 'transcribing'
+  | 'processing'
+  | 'speaking'
+  | 'follow_up_listening'
+  | 'stopping'
+  | 'error';
+
+export type VoiceConversationEvent =
+  | 'speech_start'
+  | 'playback_complete'
+  | 'playback_failed';
+
+export interface VoiceStatusResponse {
+  enabled: boolean;
+  available: boolean;
+  components: Record<string, boolean>;
+  states: VoiceConversationState[];
+  active_session_id: string | null;
+  state: VoiceConversationState;
+  follow_up_timeout_seconds: number;
+  max_sessions: number;
+  max_turn_audio_bytes: number;
+}
+
+export interface VoiceSessionResponse {
+  session_id: string;
+  state: VoiceConversationState;
+  conversation_id: number | null;
+  created_at: string;
+  last_activity: string;
+  follow_up_timeout_seconds: number;
+  follow_up_expires_at: string | null;
+  stop_reason: string | null;
+  error: string | null;
+}
+
+export interface VoicePendingConfirmation {
+  confirmation_id: number | null;
+  tool: string | null;
+  category: string | null;
+  expires_at: string | null;
+}
+
+export interface VoiceTurnResponse extends VoiceSessionResponse {
+  transcript: string | null;
+  assistant_response: string | null;
+  provider: string | null;
+  model: string | null;
+  tts_available: boolean;
+  audio_base64: string | null;
+  audio_media_type: string | null;
+  pending_confirmations: VoicePendingConfirmation[];
+  tts_error: string | null;
+}
+
+export interface VoiceEventRequest {
+  event: VoiceConversationEvent;
+  vad_session_id?: string | null;
+}
+
+export interface VoiceStopResponse {
+  session_id: string;
+  stopped: boolean;
+  state: VoiceConversationState;
+}

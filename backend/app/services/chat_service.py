@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -25,6 +26,12 @@ from app.llm.streaming import close_async_stream
 from app.memory.context_builder import build_chat_prompt
 from app.memory.memory_retriever import memory_retriever
 from app.models.message import MessageRole
+from app.personality import (
+    PersonalityConfig,
+    build_persona_instructions,
+    personality_fingerprint,
+    personality_service,
+)
 from app.services.conversation_service import (
     conversation_service,
     derive_title,
@@ -39,6 +46,17 @@ logger = logging.getLogger(__name__)
 
 
 CHAT_MEMORY_LIMIT = 5
+
+
+def _persona_cache_version(config: PersonalityConfig) -> str:
+    """Return a bounded cache version for one resolved personality config."""
+
+    base_version = str(getattr(settings, "AI_CACHE_CONFIG_VERSION", "1"))
+    digest = hashlib.sha256(
+        f"{base_version}|{personality_fingerprint(config)}".encode("utf-8")
+    ).hexdigest()[:24]
+
+    return f"persona-{digest}"
 
 
 class _StreamTooLong(Exception):
@@ -167,6 +185,35 @@ class ChatService:
                 "memory context."
             )
             return []
+
+    async def _resolve_persona(
+        self,
+        session: AsyncSession | None,
+        user_id: int | None,
+        prompt: str,
+        history: list,
+    ) -> tuple[PersonalityConfig, str]:
+        """Resolve the shared persona for this turn with safe degradation."""
+
+        try:
+            state = await personality_service.get_state(
+                session=session,
+                user_id=user_id,
+            )
+
+        except Exception:
+            # Personality must never take down chat. Fall back to the validated
+            # configured defaults, which do not require a database session.
+            logger.exception(
+                "Personality resolution failed; using configured defaults."
+            )
+            state = await personality_service.get_state()
+
+        return state.config, build_persona_instructions(
+            config=state.config,
+            user_message=prompt,
+            history=history,
+        )
 
     @staticmethod
     def _cache_eligible(
@@ -338,6 +385,13 @@ class ChatService:
                 limit=memory_limit,
             )
 
+        persona_config, persona_instructions = await self._resolve_persona(
+            session=session,
+            user_id=user_id,
+            prompt=cleaned_prompt,
+            history=history,
+        )
+
         inspection = None
 
         if user_id is not None and session is not None:
@@ -350,13 +404,16 @@ class ChatService:
                 memories=memories,
                 provider=route.primary,
                 model=route.primary_model,
+                persona_instructions=persona_instructions,
             )
             contextual_prompt = inspection.prompt
         else:
-            # No trusted identity: keep unauthenticated chat context-free.
+            # No trusted identity: keep unauthenticated chat context-free but
+            # still apply the configured ASTA persona.
             contextual_prompt = build_chat_prompt(
                 user_message=cleaned_prompt,
-                memories=[]
+                memories=[],
+                persona_instructions=persona_instructions,
             )
 
         cache_eligible = (
@@ -378,6 +435,7 @@ class ChatService:
                 session=session,
                 user_id=user_id,
                 query=cleaned_prompt,
+                config_version=_persona_cache_version(persona_config),
             )
 
         if cached is not None:
@@ -446,6 +504,7 @@ class ChatService:
                     private=False,
                     prompt=contextual_prompt,
                     complexity=classification.complexity,
+                    persona_instructions=persona_instructions,
                 )
 
             if tool_result is None:
@@ -533,6 +592,7 @@ class ChatService:
                 model=result.get("model"),
                 complexity=classification.complexity.value,
                 routing_policy=route.policy,
+                config_version=_persona_cache_version(persona_config),
             )
 
         if session is not None:
@@ -764,6 +824,13 @@ class ChatService:
                 limit=memory_limit,
             )
 
+        persona_config, persona_instructions = await self._resolve_persona(
+            session=session,
+            user_id=user_id,
+            prompt=cleaned_prompt,
+            history=history,
+        )
+
         if user_id is not None and session is not None:
             inspection = await unified_context_builder.inspect(
                 session=session,
@@ -774,12 +841,14 @@ class ChatService:
                 memories=memories,
                 provider=route.primary,
                 model=route.primary_model,
+                persona_instructions=persona_instructions,
             )
             contextual_prompt = inspection.prompt
         else:
             contextual_prompt = build_chat_prompt(
                 user_message=cleaned_prompt,
                 memories=[],
+                persona_instructions=persona_instructions,
             )
 
         started = time.perf_counter()
@@ -804,6 +873,7 @@ class ChatService:
                     private=False,
                     prompt=contextual_prompt,
                     complexity=classification.complexity,
+                    persona_instructions=persona_instructions,
                 )
 
             except asyncio.CancelledError:

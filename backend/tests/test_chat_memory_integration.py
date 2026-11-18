@@ -179,6 +179,12 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def _prompt(generate_mock) -> str:
         return generate_mock.await_args.args[0]
 
+    def _assert_persona_only_prompt(self, prompt: str, message: str) -> None:
+        self.assertIn("SYSTEM INSTRUCTIONS:", prompt)
+        self.assertIn("You are ASTA", prompt)
+        self.assertIn(f"<user_message>\n{message}\n</user_message>", prompt)
+        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+
     # ------------------------------------------------------------------
     # 1. Chat without relevant memories
     # ------------------------------------------------------------------
@@ -208,8 +214,7 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["response"], "groq answer")
 
         prompt = self._prompt(groq_generate)
-        self.assertEqual(prompt, "quantum physics")
-        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+        self._assert_persona_only_prompt(prompt, "quantum physics")
 
         ollama_generate.assert_not_awaited()
 
@@ -237,8 +242,7 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
 
         prompt = self._prompt(groq_generate)
-        self.assertEqual(prompt, "What is my career goal?")
-        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+        self._assert_persona_only_prompt(prompt, "What is my career goal?")
 
     # ------------------------------------------------------------------
     # 2. Chat with relevant approved memories
@@ -427,7 +431,7 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = self._prompt(groq_generate)
 
-        self.assertEqual(prompt, "What is my career goal?")
+        self._assert_persona_only_prompt(prompt, "What is my career goal?")
         self.assertNotIn("AI/ML Engineer", prompt)
 
     # ------------------------------------------------------------------
@@ -753,8 +757,7 @@ class ChatMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         retrieve_mock.assert_awaited_once()
 
         prompt = self._prompt(groq_generate)
-        self.assertEqual(prompt, "What is my career goal?")
-        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+        self._assert_persona_only_prompt(prompt, "What is my career goal?")
 
 
 if __name__ == "__main__":

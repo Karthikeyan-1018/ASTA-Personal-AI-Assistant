@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   confirmElevatedTools: true,
   autoApproveReadOnly: true,
   auditLogging: true,
+  ttsEnabled: true,
 };
 
 function loadStoredSettings(): UserSettings {

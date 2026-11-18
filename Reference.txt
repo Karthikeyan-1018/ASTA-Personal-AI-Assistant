@@ -54,6 +54,16 @@ Phase	Name	Priority
 17	Browser Automation	High
 18	Autonomous AI Agent	Final stage
 
+What should we implement next?
+
+Phase 18 – Intelligent Memory System (recommended)
+
+Advanced Personal Scheduling
+
+Voice Assistant and Wake Word
+
+Proactive AI Agent
+
 
 ..\venv\Scripts\Activate.ps1
 To run backend :

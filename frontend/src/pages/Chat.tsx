@@ -18,9 +18,17 @@ import {
   Shield,
   AlertTriangle,
   Loader2,
+  Mic,
+  Volume2,
+  X,
 } from 'lucide-react';
 import { useChatStore } from '../stores/chat.store';
 import { useAuthStore } from '../stores/auth.store';
+import { useSettingsStore } from '../stores/settings.store';
+import { useTTSStore } from '../stores/tts.store';
+import { useSTTStore } from '../stores/stt.store';
+import { useVADStore, type VADStatus } from '../stores/vad.store';
+import { useVoiceConversationStore } from '../stores/voiceConversation.store';
 import MarkdownRenderer from '../components/chat/MarkdownRenderer';
 
 interface StarterPrompt {
@@ -96,6 +104,83 @@ const InlineError: React.FC<{
   </div>
 );
 
+function formatRecordingDuration(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole / 60);
+  return `${String(minutes).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+function vadStatusLabel(status: VADStatus, error: string | null): string {
+  if (error) return 'VAD unavailable';
+
+  switch (status) {
+    case 'speech':
+      return 'Speech detected';
+    case 'silence':
+      return 'Silence detected';
+    case 'completed':
+      return 'Speech segment completed';
+    case 'starting':
+      return 'VAD starting';
+    case 'listening':
+      return 'Listening for speech';
+    case 'unavailable':
+      return 'VAD unavailable';
+    case 'idle':
+    default:
+      return 'VAD idle';
+  }
+}
+
+function vadDotClass(status: VADStatus, error: string | null): string {
+  if (error || status === 'unavailable') return 'bg-rose-400';
+  if (status === 'speech') return 'bg-emerald-400';
+  if (status === 'completed') return 'bg-indigo-400';
+  if (status === 'silence') return 'bg-amber-300';
+  return 'bg-slate-400';
+}
+
+function voiceStateLabel(
+  state: string,
+  micActive: boolean,
+  audioPlaying: boolean,
+): string {
+  switch (state) {
+    case 'listening':
+      return micActive ? 'listening · mic active' : 'listening · mic unavailable';
+    case 'speech_detected':
+      return 'speech detected';
+    case 'transcribing':
+    case 'processing':
+      return `${state} · mic released`;
+    case 'speaking':
+      return audioPlaying ? 'speaking · audio playing' : 'speaking · preparing audio';
+    case 'follow_up_listening':
+      return micActive
+        ? 'follow-up listening · mic active'
+        : 'follow-up listening · mic unavailable';
+    case 'stopping':
+      return 'stopping';
+    case 'error':
+      return 'error';
+    default:
+      return state;
+  }
+}
+
+function voiceStateDotClass(
+  state: string,
+  micActive: boolean,
+  audioPlaying: boolean,
+): string {
+  if (state === 'error') return 'bg-rose-400';
+  if (state === 'speaking') return audioPlaying ? 'bg-indigo-400' : 'bg-slate-400';
+  if (state === 'listening' || state === 'follow_up_listening') {
+    return micActive ? 'bg-emerald-400' : 'bg-slate-400';
+  }
+  return 'bg-amber-300';
+}
+
 export const Chat: React.FC = () => {
   const conversations = useChatStore((s) => s.conversations);
   const activeConversationId = useChatStore((s) => s.activeConversationId);
@@ -122,6 +207,52 @@ export const Chat: React.FC = () => {
   const clearStreamError = useChatStore((s) => s.clearStreamError);
 
   const user = useAuthStore((s) => s.user);
+  const ttsEnabled = useSettingsStore((s) => s.settings.ttsEnabled);
+  const ttsBackendAvailable = useTTSStore((s) => s.backendAvailable);
+  const ttsSpeakingId = useTTSStore((s) => s.speakingId);
+  const ttsLoadingId = useTTSStore((s) => s.loadingId);
+  const ttsErrorId = useTTSStore((s) => s.errorId);
+  const ttsErrorMessage = useTTSStore((s) => s.errorMessage);
+  const ttsRefreshStatus = useTTSStore((s) => s.refreshStatus);
+  const ttsSpeak = useTTSStore((s) => s.speak);
+  const ttsStop = useTTSStore((s) => s.stop);
+  const ttsClearError = useTTSStore((s) => s.clearError);
+
+  const sttBackendAvailable = useSTTStore((s) => s.backendAvailable);
+  const sttRequestingPermission = useSTTStore((s) => s.isRequestingPermission);
+  const sttRecording = useSTTStore((s) => s.isRecording);
+  const sttTranscribing = useSTTStore((s) => s.isTranscribing);
+  const sttRecordingSeconds = useSTTStore((s) => s.recordingSeconds);
+  const sttError = useSTTStore((s) => s.error);
+  const sttTranscript = useSTTStore((s) => s.lastTranscript);
+  const sttRefreshStatus = useSTTStore((s) => s.refreshStatus);
+  const sttStartRecording = useSTTStore((s) => s.startRecording);
+  const sttStopRecording = useSTTStore((s) => s.stopRecording);
+  const sttCancelRecording = useSTTStore((s) => s.cancelRecording);
+  const sttClearError = useSTTStore((s) => s.clearError);
+  const sttClearTranscript = useSTTStore((s) => s.clearTranscript);
+
+  const vadActive = useVADStore((s) => s.active);
+  const vadStatus = useVADStore((s) => s.state);
+  const vadError = useVADStore((s) => s.error);
+
+  const voiceEnabled = useVoiceConversationStore((s) => s.enabled);
+  const voiceAvailable = useVoiceConversationStore((s) => s.available);
+  const voiceSessionId = useVoiceConversationStore((s) => s.sessionId);
+  const voiceState = useVoiceConversationStore((s) => s.state);
+  const voiceConversationId = useVoiceConversationStore((s) => s.conversationId);
+  const voiceRemaining = useVoiceConversationStore(
+    (s) => s.followUpRemainingSeconds,
+  );
+  const voiceBusy = useVoiceConversationStore((s) => s.busy);
+  const voiceMicActive = useVoiceConversationStore((s) => s.micActive);
+  const voiceAudioPlaying = useVoiceConversationStore((s) => s.audioPlaying);
+  const voiceError = useVoiceConversationStore((s) => s.error);
+  const voiceTurnSequence = useVoiceConversationStore((s) => s.turnSequence);
+  const voiceRefreshStatus = useVoiceConversationStore((s) => s.refreshStatus);
+  const voiceStart = useVoiceConversationStore((s) => s.start);
+  const voiceStop = useVoiceConversationStore((s) => s.stop);
+  const voiceClearError = useVoiceConversationStore((s) => s.clearError);
 
   const [input, setInput] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -153,6 +284,16 @@ export const Chat: React.FC = () => {
     conversationsStatus === 'loading' ||
     (conversationsStatus === 'idle' && !conversationsLoaded);
   const initialListFailure = listFailed && !conversationsLoaded && !hasConversations;
+  const ttsAvailable = ttsEnabled && ttsBackendAvailable !== false;
+  const voiceActive = Boolean(voiceSessionId) || voiceBusy;
+  const voiceStartDisabled =
+    voiceEnabled === false ||
+    voiceAvailable === false ||
+    voiceActive ||
+    sttRequestingPermission ||
+    sttRecording ||
+    sttTranscribing ||
+    isBusy;
 
   // AppShell loads conversations on authentication. If Chat mounts first, start
   // the same request here; the store serialises it so only one request runs.
@@ -161,6 +302,60 @@ export const Chat: React.FC = () => {
       void loadConversations();
     }
   }, [conversationsStatus, loadConversations]);
+
+  // Local TTS capability is checked once. This never generates or plays audio.
+  useEffect(() => {
+    void ttsRefreshStatus();
+  }, [ttsRefreshStatus]);
+
+  // Local STT capability is checked once. This never opens the microphone.
+  useEffect(() => {
+    void sttRefreshStatus();
+  }, [sttRefreshStatus]);
+
+  // Local voice conversation capability is checked once. This never starts a
+  // conversation or opens the microphone.
+  useEffect(() => {
+    void voiceRefreshStatus();
+  }, [voiceRefreshStatus]);
+
+  // Released on every Chat exit path; VAD never records in the background.
+  useEffect(() => () => useVADStore.getState().cancel(), []);
+
+  // Stage 4 owns its own explicit stop and playback cleanup on Chat exit.
+  useEffect(() => () => void useVoiceConversationStore.getState().stop(), []);
+
+  // Explicit per-message playback and an active voice conversation never
+  // compete for the same audio output.
+  useEffect(() => {
+    if (voiceSessionId) ttsStop();
+  }, [voiceSessionId, ttsStop]);
+
+  // Voice turns use the existing chat service and conversation store. Refresh
+  // the visible thread from the backend after each real turn; never fabricate
+  // a local transcript message.
+  useEffect(() => {
+    if (!voiceConversationId || voiceTurnSequence === 0) return;
+    const id = String(voiceConversationId);
+    void (async () => {
+      await useChatStore.getState().loadConversations();
+      const state = useChatStore.getState();
+      if (!state.conversations.some((conversation) => conversation.id === id)) {
+        return;
+      }
+      state.setActiveConversationId(id);
+      await useChatStore.getState().loadMessages(id, true);
+    })();
+  }, [voiceConversationId, voiceTurnSequence]);
+
+  // Explicitly stop speech when it is disabled or the viewed thread changes.
+  useEffect(() => {
+    if (!ttsEnabled) ttsStop();
+  }, [ttsEnabled, ttsStop]);
+
+  useEffect(() => {
+    ttsStop();
+  }, [activeConversationId, ttsStop]);
 
   // Fetch message history lazily for the active conversation only.
   useEffect(() => {
@@ -205,10 +400,23 @@ export const Chat: React.FC = () => {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   }, [input]);
 
+  // A completed transcription only populates the editable draft. Sending
+  // remains an explicit separate user action through handleSend.
+  useEffect(() => {
+    const cleaned = sttTranscript?.trim();
+    if (!cleaned) return;
+
+    setInput((previous) => {
+      const base = previous.replace(/\s+$/, '');
+      return base ? `${base} ${cleaned}` : cleaned;
+    });
+    sttClearTranscript();
+  }, [sttTranscript, sttClearTranscript]);
+
   const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || isBusy) return;
+    if (!trimmed || isBusy || voiceActive) return;
 
     setInput('');
     if (textareaRef.current) {
@@ -540,6 +748,38 @@ export const Chat: React.FC = () => {
 
               {!isUser && !isCurrentlyStreaming && msg.content && (
                 <div className="flex items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+                  {ttsAvailable &&
+                    !voiceActive &&
+                    (ttsSpeakingId === msg.id || ttsLoadingId === msg.id ? (
+                      <button
+                        type="button"
+                        onClick={ttsStop}
+                        className="inline-flex items-center gap-1 rounded p-1 font-medium text-indigo-300 hover:bg-slate-800 hover:text-indigo-200"
+                        title={ttsLoadingId === msg.id ? 'Generating speech - click to stop' : 'Stop playback'}
+                        aria-label={ttsLoadingId === msg.id ? 'Stop speech generation' : 'Stop speech playback'}
+                      >
+                        {ttsLoadingId === msg.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Square className="h-3 w-3 fill-current" />
+                        )}
+                        <span className="hidden text-[10px] sm:inline">
+                          {ttsLoadingId === msg.id ? 'Loading' : 'Speaking'}
+                        </span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void ttsSpeak(msg.id, msg.content)}
+                        className="inline-flex items-center gap-1 rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-indigo-200"
+                        title="Speak this response"
+                        aria-label="Speak this response"
+                      >
+                        <Volume2 className="h-3.5 w-3.5" />
+                        <span className="hidden text-[10px] sm:inline">Speak</span>
+                      </button>
+                    ))}
+
                   <button
                     type="button"
                     onClick={() => void handleCopyMessage(msg.id, msg.content)}
@@ -551,6 +791,21 @@ export const Chat: React.FC = () => {
                     ) : (
                       <Copy className="h-3.5 w-3.5" />
                     )}
+                  </button>
+                </div>
+              )}
+
+              {!isUser && ttsErrorId === msg.id && ttsErrorMessage && (
+                <div className="mt-1 flex max-w-full items-start gap-2 rounded-lg border border-rose-500/25 bg-rose-500/10 px-2 py-1.5 text-[10px] text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span className="min-w-0 flex-1 break-words">{ttsErrorMessage}</span>
+                  <button
+                    type="button"
+                    onClick={ttsClearError}
+                    className="shrink-0 text-rose-300 hover:text-rose-100"
+                    title="Dismiss speech error"
+                  >
+                    Dismiss
                   </button>
                 </div>
               )}
@@ -792,6 +1047,105 @@ export const Chat: React.FC = () => {
               />
 
               <div className="flex items-center gap-1.5 p-2 shrink-0">
+                {voiceSessionId ? (
+                  <button
+                    type="button"
+                    onClick={() => void voiceStop()}
+                    className="flex h-8 items-center gap-1.5 rounded-xl bg-rose-600 px-2.5 text-[11px] font-medium text-white shadow-md shadow-rose-600/30 transition hover:bg-rose-500"
+                    title="Stop voice conversation"
+                    aria-label="Stop voice conversation"
+                  >
+                    <Square className="h-3 w-3 fill-current" />
+                    <span className="hidden sm:inline">Stop conversation</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void voiceStart()}
+                    disabled={voiceStartDisabled}
+                    className="flex h-8 items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-2.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/50 hover:bg-indigo-500/15 hover:text-indigo-200 disabled:opacity-40"
+                    title={
+                      voiceEnabled === false || voiceAvailable === false
+                        ? 'Local voice conversation is unavailable'
+                        : 'Start voice conversation'
+                    }
+                    aria-label="Start voice conversation"
+                  >
+                    {voiceBusy ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <MessageSquare className="h-3.5 w-3.5" />
+                    )}
+                    <span className="hidden sm:inline">
+                      {voiceBusy ? 'Starting' : 'Voice'}
+                    </span>
+                  </button>
+                )}
+
+                {sttRequestingPermission ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="flex items-center gap-1 text-[10px] text-indigo-300">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Allow microphone
+                    </span>
+                    <button
+                      type="button"
+                      onClick={sttCancelRecording}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-700 bg-slate-800 text-slate-300 transition hover:bg-slate-700 hover:text-white"
+                      title="Cancel microphone request"
+                      aria-label="Cancel microphone request"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : sttRecording ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="rounded-lg bg-rose-500/15 px-2 py-1 font-mono text-[11px] tabular-nums text-rose-200">
+                      {formatRecordingDuration(sttRecordingSeconds)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={sttStopRecording}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-rose-600 text-white shadow-md shadow-rose-600/30 transition hover:bg-rose-500"
+                      title="Stop recording"
+                      aria-label="Stop recording"
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={sttCancelRecording}
+                      className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-700 bg-slate-800 text-slate-300 transition hover:bg-slate-700 hover:text-white"
+                      title="Cancel recording"
+                      aria-label="Cancel recording"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ) : sttTranscribing ? (
+                  <span className="flex items-center gap-1 rounded-lg bg-indigo-500/10 px-2 py-1 text-[10px] text-indigo-300">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Transcribing...
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void sttStartRecording()}
+                    disabled={sttBackendAvailable === false || isBusy || voiceActive}
+                    className="flex h-8 w-8 items-center justify-center rounded-xl border border-slate-700 bg-slate-800 text-slate-300 transition hover:border-indigo-500/50 hover:bg-indigo-500/15 hover:text-indigo-200 disabled:opacity-40"
+                    title={
+                      voiceActive
+                        ? 'Stop the voice conversation to use the manual microphone'
+                        : sttBackendAvailable === false
+                          ? 'Local speech-to-text is unavailable'
+                          : 'Record a message'
+                    }
+                    aria-label="Record a message"
+                  >
+                    <Mic className="h-3.5 w-3.5" />
+                  </button>
+                )}
+
                 {isStreaming ? (
                   <button
                     type="button"
@@ -804,9 +1158,15 @@ export const Chat: React.FC = () => {
                 ) : (
                   <button
                     type="submit"
-                    disabled={!input.trim() || isSending}
+                    disabled={!input.trim() || isSending || voiceActive}
                     className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-40"
-                    title={isSending ? 'Creating conversation...' : 'Send message (Enter)'}
+                    title={
+                      voiceActive
+                        ? 'Stop the voice conversation to send a text message'
+                        : isSending
+                          ? 'Creating conversation...'
+                          : 'Send message (Enter)'
+                    }
                   >
                     {isSending ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -824,12 +1184,73 @@ export const Chat: React.FC = () => {
                 Press <kbd className="rounded border border-slate-700 bg-slate-800 px-1 py-0.2 text-[10px] text-slate-300">Enter</kbd> to send, <kbd className="rounded border border-slate-700 bg-slate-800 px-1 py-0.2 text-[10px] text-slate-300">Shift + Enter</kbd> for newline
               </span>
               <div className="flex items-center gap-2 ml-auto">
+                {voiceSessionId && (
+                  <span
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-1 text-[10px] text-slate-300"
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${voiceStateDotClass(voiceState, voiceMicActive, voiceAudioPlaying)}`}
+                    />
+                    Voice · {voiceStateLabel(voiceState, voiceMicActive, voiceAudioPlaying)}
+                    {voiceRemaining !== null && ` · ${voiceRemaining}s`}
+                  </span>
+                )}
+                {sttRecording && (vadActive || vadError) && (
+                  <span
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-1 text-[10px] text-slate-300"
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${vadDotClass(vadStatus, vadError)}`}
+                    />
+                    {vadStatusLabel(vadStatus, vadError)}
+                  </span>
+                )}
                 <span className="flex items-center gap-1 text-[10px] text-indigo-400">
                   <Shield className="h-3 w-3" />
                   Authenticated session
                 </span>
               </div>
             </div>
+
+            {sttError && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200"
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-300" />
+                <span className="min-w-0 flex-1 break-words">{sttError}</span>
+                <button
+                  type="button"
+                  onClick={sttClearError}
+                  className="shrink-0 text-rose-300 hover:text-rose-100"
+                  title="Dismiss speech-to-text error"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {voiceError && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200"
+              >
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-300" />
+                <span className="min-w-0 flex-1 break-words">{voiceError}</span>
+                <button
+                  type="button"
+                  onClick={voiceClearError}
+                  className="shrink-0 text-rose-300 hover:text-rose-100"
+                  title="Dismiss voice conversation error"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
           </form>
         </div>
       </div>

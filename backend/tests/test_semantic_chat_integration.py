@@ -194,6 +194,12 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def _prompt(generate_mock) -> str:
         return generate_mock.await_args.args[0]
 
+    def _assert_persona_only_prompt(self, prompt: str, message: str) -> None:
+        self.assertIn("SYSTEM INSTRUCTIONS:", prompt)
+        self.assertIn("You are ASTA", prompt)
+        self.assertIn(f"<user_message>\n{message}\n</user_message>", prompt)
+        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+
     # ------------------------------------------------------------------
     # 1. Semantic context
     # ------------------------------------------------------------------
@@ -278,7 +284,10 @@ class SemanticChatIntegrationTests(unittest.IsolatedAsyncioTestCase):
         prompt = self._prompt(groq_generate)
 
         self.assertNotIn(content, prompt)
-        self.assertEqual(prompt, "What do I do for a living?")
+        self._assert_persona_only_prompt(
+            prompt,
+            "What do I do for a living?",
+        )
 
     async def test_chat_semantic_context_excludes_pending_and_rejected(self):
 

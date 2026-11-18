@@ -14,6 +14,7 @@ import {
 import { useSettingsStore } from '../stores/settings.store';
 import { useAuthStore } from '../stores/auth.store';
 import NotificationPreferencesPanel from '../components/settings/NotificationPreferencesPanel';
+import PersonalityPanel from '../components/settings/PersonalityPanel';
 import type { UserSettings } from '../types/settings.types';
 
 type SettingsTab =
@@ -237,6 +238,8 @@ export const Settings: React.FC = () => {
             <div className="space-y-6">
               <h2 className="text-base font-bold text-white">Conversational Co-Pilot Parameters</h2>
 
+              <PersonalityPanel />
+
               <div className="space-y-5">
                 <div>
                   <label className="block text-xs font-medium text-slate-300">Default Model</label>
@@ -293,6 +296,21 @@ export const Settings: React.FC = () => {
                     type="checkbox"
                     checked={settings.sendOnEnter}
                     onChange={(e) => handleUpdate({ sendOnEnter: e.target.checked })}
+                    className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-between max-w-md border-t border-slate-800/80 pt-4">
+                  <div>
+                    <p className="text-xs font-semibold text-slate-200">Spoken Responses</p>
+                    <p className="text-[11px] text-slate-500">
+                      Allow local speech when you press Speak on a response
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.ttsEnabled}
+                    onChange={(e) => handleUpdate({ ttsEnabled: e.target.checked })}
                     className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-indigo-500"
                   />
                 </div>

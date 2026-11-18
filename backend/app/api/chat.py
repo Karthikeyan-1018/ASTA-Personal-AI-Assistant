@@ -22,6 +22,7 @@ from app.exceptions.llm_exceptions import (
     LLMUnavailableError,
 )
 from app.models.message import MessageRole
+from app.personality import build_persona_instructions, personality_service
 from app.services.chat_service import chat_service
 from app.services.conversation_service import conversation_service
 from app.services.tool_confirmation_service import tool_confirmation_service
@@ -593,6 +594,24 @@ async def approve_chat_confirmation(
     }:
         raise _confirmation_resolved()
 
+    try:
+        persona_state = await personality_service.get_state(
+            session=session,
+            user_id=user_id,
+        )
+
+    except Exception:
+        logger.exception(
+            "Personality resolution failed while resuming a tool action; "
+            "using configured defaults."
+        )
+        persona_state = await personality_service.get_state()
+
+    persona_instructions = build_persona_instructions(
+        config=persona_state.config,
+        user_message=f"Finish the confirmed {tool_name} action.",
+    )
+
     payload = await tool_orchestrator.resume_after_confirmation(
         session=session,
         user_id=user_id,
@@ -600,6 +619,7 @@ async def approve_chat_confirmation(
         tool_name=tool_name,
         result=result,
         private=False,
+        persona_instructions=persona_instructions,
     )
 
     payload = dict(payload)

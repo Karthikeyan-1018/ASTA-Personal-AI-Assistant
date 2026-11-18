@@ -17,17 +17,23 @@ from app.api.chat import router as chat_router
 from app.api.conversations import router as conversations_router
 from app.api.memory import router as memory_router
 from app.api.notifications import router as notifications_router
+from app.api.personality import router as personality_router
 from app.api.preferences import router as preferences_router
 from app.api.recurrences import router as recurrences_router
 from app.api.reminders import router as reminders_router
+from app.api.stt import router as stt_router
 from app.api.task_actions import router as task_actions_router
 from app.api.tasks import router as tasks_router
+from app.api.tts import router as tts_router
+from app.api.vad import router as vad_router
+from app.api.voice_conversation import router as voice_conversation_router
 from app.api.tools import router as tools_router
 from app.core.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.scheduler.runner import BackgroundScheduler
 from app.services.background_task_service import background_task_service
 from app.services.tool_history_service import tool_history_service
+from app.services.voice_conversation_manager import voice_conversation_manager
 from app.tools import os_security
 
 
@@ -120,6 +126,14 @@ async def lifespan(app: FastAPI):
         yield
 
     finally:
+        # Stage 4 state is process-local. Cancel follow-up tasks and release
+        # all sessions before the event loop closes.
+        try:
+            await voice_conversation_manager.shutdown()
+
+        except Exception:
+            logger.exception("Voice conversation shutdown failed; continuing.")
+
         if scheduler is not None:
             await scheduler.stop()
 
@@ -180,6 +194,38 @@ async def validation_exception_handler(
             content={"detail": "Invalid chat request body."}
         )
 
+    # Keep TTS validation errors generic so private response text is never
+    # reflected back in a structured validation payload.
+    if request.url.path.startswith("/api/tts"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid TTS request."}
+        )
+
+    # Audio upload validation errors must stay generic and must not reflect
+    # uploaded bytes, filenames, or content types.
+    if request.url.path.startswith("/api/stt"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid audio upload."}
+        )
+
+    # VAD request validation errors must stay generic and must not reflect
+    # uploaded bytes, filenames, or content types.
+    if request.url.path.startswith("/api/vad"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid VAD request."}
+        )
+
+    # Voice conversation requests must not reflect uploaded bytes, filenames,
+    # transcripts, or private response text in validation payloads.
+    if request.url.path.startswith("/api/voice-conversations"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid voice conversation request."}
+        )
+
     # Keep FastAPI's default validation response for all other routes.
     return await request_validation_exception_handler(request, exc)
 
@@ -199,6 +245,8 @@ app.include_router(conversations_router)
 
 app.include_router(preferences_router)
 
+app.include_router(personality_router)
+
 app.include_router(tasks_router)
 
 app.include_router(reminders_router)
@@ -209,6 +257,10 @@ app.include_router(recurrences_router)
 
 app.include_router(task_actions_router)
 app.include_router(tools_router)
+app.include_router(tts_router)
+app.include_router(stt_router)
+app.include_router(vad_router)
+app.include_router(voice_conversation_router)
 app.include_router(background_tasks_router)
 
 

@@ -161,6 +161,12 @@ class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         return generate_mock.await_args.kwargs["prompt"]
 
+    def _assert_persona_only_prompt(self, prompt: str, message: str) -> None:
+        self.assertIn("SYSTEM INSTRUCTIONS:", prompt)
+        self.assertIn("You are ASTA", prompt)
+        self.assertIn(f"<user_message>\n{message}\n</user_message>", prompt)
+        self.assertNotIn("CONVERSATION HISTORY", prompt)
+
     async def _create_conversation(
         self,
         title: str | None = None,
@@ -382,7 +388,10 @@ class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(body["provider"], "groq")
         self.assertEqual(body["response"], "The answer")
-        self.assertEqual(self._prompt(groq_generate), "What is ASTA?")
+        self._assert_persona_only_prompt(
+            self._prompt(groq_generate),
+            "What is ASTA?",
+        )
 
         messages = await self._messages(conversation_id)
 
@@ -482,7 +491,10 @@ class ConversationPersistenceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self._prompt(groq_generate), "First ever message")
+        self._assert_persona_only_prompt(
+            self._prompt(groq_generate),
+            "First ever message",
+        )
 
     async def test_history_limit_is_bounded(self):
 

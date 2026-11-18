@@ -181,6 +181,7 @@ class UnifiedContextBuilder:
         memories: list | None = None,
         provider: str | None = None,
         model: str | None = None,
+        persona_instructions: str | None = None,
     ) -> str:
 
         request = ContextRequest(
@@ -196,6 +197,7 @@ class UnifiedContextBuilder:
             request,
             provider=provider,
             model=model,
+            persona_instructions=persona_instructions,
         )
 
         return prompt
@@ -210,6 +212,7 @@ class UnifiedContextBuilder:
         memories: list | None = None,
         provider: str | None = None,
         model: str | None = None,
+        persona_instructions: str | None = None,
     ) -> ContextInspection:
         """Return the exact assembled prompt and source summary.
 
@@ -231,6 +234,7 @@ class UnifiedContextBuilder:
             request,
             provider=provider,
             model=model,
+            persona_instructions=persona_instructions,
         )
 
         budget = self._resolve_budget(provider=provider, model=model)
@@ -283,6 +287,7 @@ class UnifiedContextBuilder:
         request: ContextRequest,
         provider: str | None = None,
         model: str | None = None,
+        persona_instructions: str | None = None,
     ) -> tuple[dict[ContextSource, list], str, tuple[ContextSource, ...]]:
         """Retrieve, deduplicate, group, and render one context request."""
 
@@ -314,6 +319,7 @@ class UnifiedContextBuilder:
             grouped,
             request.query,
             budget=self._resolve_budget(provider=provider, model=model),
+            persona_instructions=persona_instructions,
         )
 
         return grouped, prompt, trimmed
@@ -366,7 +372,8 @@ class UnifiedContextBuilder:
     @staticmethod
     def _render(
         grouped: dict[ContextSource, list],
-        user_message: str
+        user_message: str,
+        persona_instructions: str | None = None,
     ) -> str:
 
         return build_chat_prompt(
@@ -375,7 +382,8 @@ class UnifiedContextBuilder:
             history=grouped[ContextSource.HISTORY] or None,
             preferences=grouped[ContextSource.PREFERENCE] or None,
             task_context=grouped[ContextSource.TASK] or None,
-            deadline_context=grouped[ContextSource.DEADLINE] or None
+            deadline_context=grouped[ContextSource.DEADLINE] or None,
+            persona_instructions=persona_instructions,
         )
 
     def _render_with_budget(
@@ -383,6 +391,7 @@ class UnifiedContextBuilder:
         grouped: dict[ContextSource, list],
         user_message: str,
         budget=None,
+        persona_instructions: str | None = None,
     ) -> tuple[str, tuple[ContextSource, ...]]:
         """Trim lowest-priority context until character and token budgets fit.
 
@@ -391,7 +400,11 @@ class UnifiedContextBuilder:
         request cannot silently lose the user's question.
         """
 
-        prompt = self._render(grouped, user_message)
+        prompt = self._render(
+            grouped,
+            user_message,
+            persona_instructions=persona_instructions,
+        )
         max_chars = max(1, settings.CONTEXT_MAX_CHARS)
         max_tokens = budget.available if budget is not None else None
 
@@ -439,7 +452,11 @@ class UnifiedContextBuilder:
             if not removed:
                 break
 
-            prompt = self._render(grouped, user_message)
+            prompt = self._render(
+            grouped,
+            user_message,
+            persona_instructions=persona_instructions,
+        )
 
         return prompt, tuple(trimmed)
 

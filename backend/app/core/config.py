@@ -107,6 +107,49 @@ class Settings:
         os.getenv("PREFERENCE_MAX_VALUE_CHARS", "1000")
     )
 
+    # Personality configuration. These values are provider independent and
+    # contain no credentials. Validation and safe fallbacks live in the
+    # personality package so a malformed value cannot change ASTA's identity.
+    PERSONALITY_ASSISTANT_NAME: str = os.getenv(
+        "PERSONALITY_ASSISTANT_NAME",
+        "ASTA"
+    ).strip()
+
+    PERSONALITY_DEFAULT_MODE: str = os.getenv(
+        "PERSONALITY_DEFAULT_MODE",
+        "normal"
+    ).strip().lower()
+
+    PERSONALITY_TRAITS: str = os.getenv(
+        "PERSONALITY_TRAITS",
+        "friendly, confident, determined, supportive, intelligent, curious, "
+        "patient, occasionally playful, honest, trustworthy"
+    )
+
+    PERSONALITY_MOTIVATIONAL_PHILOSOPHY: str = os.getenv(
+        "PERSONALITY_MOTIVATIONAL_PHILOSOPHY",
+        "Never give up. I'll keep moving forward with you."
+    )
+
+    PERSONALITY_PROACTIVE_MOTIVATION: bool = os.getenv(
+        "PERSONALITY_PROACTIVE_MOTIVATION",
+        "true"
+    ).lower() == "true"
+
+    PERSONALITY_MOTIVATION_INTENSITY: int = int(
+        os.getenv("PERSONALITY_MOTIVATION_INTENSITY", "3")
+    )
+
+    PERSONALITY_RESPONSE_STYLE: str = os.getenv(
+        "PERSONALITY_RESPONSE_STYLE",
+        "natural, clear, concise, and conversational"
+    )
+
+    PERSONALITY_HUMOR_ENABLED: bool = os.getenv(
+        "PERSONALITY_HUMOR_ENABLED",
+        "true"
+    ).lower() == "true"
+
     # Unified context configuration
     CONTEXT_MAX_CHARS: int = int(
         os.getenv("CONTEXT_MAX_CHARS", "12000")
@@ -620,7 +663,7 @@ class Settings:
 
     AI_CACHE_PROMPT_VERSION: str = os.getenv(
         "AI_CACHE_PROMPT_VERSION",
-        "phase9-v1"
+        "phase7-personality-v1"
     )
 
     AI_CACHE_CONFIG_VERSION: str = os.getenv(
@@ -1083,6 +1126,150 @@ class Settings:
 
     STREAM_QUEUE_TIMEOUT_SECONDS: float = float(
         os.getenv("STREAM_QUEUE_TIMEOUT_SECONDS", "5")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 18 Stage 1 local text-to-speech
+    # ------------------------------------------------------------------
+    # Disabling TTS hides the action in the UI and fails the synthesis route
+    # closed. The single verified local voice and its cache directory are
+    # backend implementation details, not user-facing settings.
+    TTS_ENABLED: bool = (
+        os.getenv("TTS_ENABLED", "true").lower() == "true"
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 18 Stage 2 local speech-to-text
+    # ------------------------------------------------------------------
+    # STT is explicit and offline. The model is installed separately under a
+    # user-owned cache directory, and the runtime never downloads or uploads
+    # audio or model data. CPU int8 avoids competing with Ollama for VRAM.
+    STT_ENABLED: bool = (
+        os.getenv("STT_ENABLED", "true").lower() == "true"
+    )
+
+    STT_MODEL_REPOSITORY: str = os.getenv(
+        "STT_MODEL_REPOSITORY",
+        "Systran/faster-whisper-small.en",
+    )
+
+    STT_MODEL_NAME: str = os.getenv(
+        "STT_MODEL_NAME",
+        "faster-whisper-small.en",
+    )
+
+    STT_MODEL_DIR: Path = Path(
+        os.getenv(
+            "STT_MODEL_DIR",
+            str(Path.home() / ".asta" / "stt" / "models" / "faster-whisper-small.en"),
+        )
+    ).expanduser()
+
+    STT_DEVICE: str = os.getenv("STT_DEVICE", "cpu").strip().lower()
+    STT_COMPUTE_TYPE: str = os.getenv("STT_COMPUTE_TYPE", "int8").strip().lower()
+    STT_CPU_THREADS: int = int(os.getenv("STT_CPU_THREADS", "4"))
+    STT_BEAM_SIZE: int = int(os.getenv("STT_BEAM_SIZE", "5"))
+
+    STT_LANGUAGE_CONFIDENCE: float = float(
+        os.getenv("STT_LANGUAGE_CONFIDENCE", "0.5")
+    )
+
+    STT_MAX_UPLOAD_BYTES: int = int(
+        os.getenv("STT_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))
+    )
+
+    STT_MAX_DURATION_SECONDS: int = int(
+        os.getenv("STT_MAX_DURATION_SECONDS", "60")
+    )
+
+    STT_MAX_CONCURRENT: int = int(os.getenv("STT_MAX_CONCURRENT", "1"))
+    STT_QUEUE_TIMEOUT_SECONDS: float = float(
+        os.getenv("STT_QUEUE_TIMEOUT_SECONDS", "5")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 18 Stage 3 local voice activity detection
+    # ------------------------------------------------------------------
+    # VAD is explicit, offline, and independent from STT and the LLM router.
+    # The bundled Silero model is loaded once from the installed package and
+    # always runs on CPU so Ollama keeps the GPU. Frontend audio is decoded and
+    # resampled to 16 kHz mono PCM before it reaches this service.
+    VAD_ENABLED: bool = (
+        os.getenv("VAD_ENABLED", "true").lower() == "true"
+    )
+
+    VAD_DEVICE: str = os.getenv("VAD_DEVICE", "cpu").strip().lower()
+    VAD_SAMPLE_RATE: int = int(os.getenv("VAD_SAMPLE_RATE", "16000"))
+    VAD_FRAME_SAMPLES: int = int(os.getenv("VAD_FRAME_SAMPLES", "512"))
+
+    # Speech starts at or above the speech threshold. A separate, lower
+    # threshold provides hysteresis so short pauses do not end an utterance.
+    VAD_SPEECH_THRESHOLD: float = float(
+        os.getenv("VAD_SPEECH_THRESHOLD", "0.5")
+    )
+    VAD_SILENCE_THRESHOLD: float = float(
+        os.getenv("VAD_SILENCE_THRESHOLD", "0.35")
+    )
+
+    VAD_MIN_SPEECH_DURATION_SECONDS: float = float(
+        os.getenv("VAD_MIN_SPEECH_DURATION_SECONDS", "0.3")
+    )
+    VAD_SILENCE_DURATION_SECONDS: float = float(
+        os.getenv("VAD_SILENCE_DURATION_SECONDS", "0.6")
+    )
+    VAD_MAX_UTTERANCE_SECONDS: float = float(
+        os.getenv("VAD_MAX_UTTERANCE_SECONDS", "15")
+    )
+    VAD_MAX_SESSION_SECONDS: float = float(
+        os.getenv("VAD_MAX_SESSION_SECONDS", "60")
+    )
+
+    # Sessions and their in-memory audio are bounded and expire automatically.
+    VAD_SESSION_IDLE_TIMEOUT_SECONDS: float = float(
+        os.getenv("VAD_SESSION_IDLE_TIMEOUT_SECONDS", "120")
+    )
+    VAD_MAX_SESSIONS: int = int(os.getenv("VAD_MAX_SESSIONS", "32"))
+    VAD_MAX_BATCH_SECONDS: float = float(
+        os.getenv("VAD_MAX_BATCH_SECONDS", "1")
+    )
+    VAD_QUEUE_TIMEOUT_SECONDS: float = float(
+        os.getenv("VAD_QUEUE_TIMEOUT_SECONDS", "5")
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 18 Stage 4 local voice conversation manager
+    # ------------------------------------------------------------------
+    # Stage 4 only coordinates Stages 1-3 and the existing chat service. It is
+    # half-duplex by design: microphone capture is released before Piper
+    # playback and reacquired only for an explicit follow-up window.
+    VOICE_CONVERSATION_ENABLED: bool = (
+        os.getenv("VOICE_CONVERSATION_ENABLED", "true").lower() == "true"
+    )
+
+    VOICE_FOLLOW_UP_TIMEOUT_SECONDS: float = float(
+        os.getenv("VOICE_FOLLOW_UP_TIMEOUT_SECONDS", "10")
+    )
+    VOICE_SESSION_IDLE_TIMEOUT_SECONDS: float = float(
+        os.getenv("VOICE_SESSION_IDLE_TIMEOUT_SECONDS", "120")
+    )
+    VOICE_SESSION_MAX_SECONDS: float = float(
+        os.getenv("VOICE_SESSION_MAX_SECONDS", "300")
+    )
+    VOICE_MAX_SESSIONS: int = int(os.getenv("VOICE_MAX_SESSIONS", "8"))
+    VOICE_MAX_SESSIONS_PER_USER: int = int(
+        os.getenv("VOICE_MAX_SESSIONS_PER_USER", "1")
+    )
+    VOICE_MIN_TRANSCRIPT_CHARS: int = int(
+        os.getenv("VOICE_MIN_TRANSCRIPT_CHARS", "2")
+    )
+    VOICE_MAX_TURN_AUDIO_BYTES: int = int(
+        os.getenv("VOICE_MAX_TURN_AUDIO_BYTES", str(10 * 1024 * 1024))
+    )
+    # Piper emits 16-bit mono WAV at 22.05 kHz, about 2.52 MiB per minute.
+    # 16 MiB covers roughly six minutes of speech while keeping synthesis
+    # memory bounded on this CPU-only 16 GB workstation.
+    VOICE_MAX_TTS_AUDIO_BYTES: int = int(
+        os.getenv("VOICE_MAX_TTS_AUDIO_BYTES", str(16 * 1024 * 1024))
     )
 
     # ------------------------------------------------------------------

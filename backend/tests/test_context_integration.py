@@ -963,6 +963,13 @@ class ContextChatEndToEndTests(unittest.IsolatedAsyncioTestCase):
     def _prompt(generate_mock) -> str:
         return generate_mock.await_args.args[0]
 
+    def _assert_persona_only_prompt(self, prompt: str, message: str) -> None:
+        self.assertIn("SYSTEM INSTRUCTIONS:", prompt)
+        self.assertIn("You are ASTA", prompt)
+        self.assertIn(f"<user_message>\n{message}\n</user_message>", prompt)
+        self.assertNotIn("RETRIEVED MEMORIES", prompt)
+        self.assertNotIn("CONVERSATION HISTORY", prompt)
+
     # ------------------------------------------------------------------
     # Six-source integration
     # ------------------------------------------------------------------
@@ -1056,7 +1063,10 @@ class ContextChatEndToEndTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self._prompt(groq_generate), "Just a plain message.")
+        self._assert_persona_only_prompt(
+            self._prompt(groq_generate),
+            "Just a plain message.",
+        )
 
     # ------------------------------------------------------------------
     # Privacy and routing
@@ -1230,7 +1240,10 @@ class ContextChatEndToEndTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self._prompt(groq_generate), "Still answer this.")
+        self._assert_persona_only_prompt(
+            self._prompt(groq_generate),
+            "Still answer this.",
+        )
 
     # ------------------------------------------------------------------
     # Persistence regression

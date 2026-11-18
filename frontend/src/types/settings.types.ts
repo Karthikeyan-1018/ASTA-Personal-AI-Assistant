@@ -14,4 +14,5 @@ export interface UserSettings {
   confirmElevatedTools: boolean;
   autoApproveReadOnly: boolean;
   auditLogging: boolean;
+  ttsEnabled: boolean;
 }
