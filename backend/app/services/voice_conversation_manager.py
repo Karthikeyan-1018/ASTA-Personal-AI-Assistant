@@ -21,6 +21,8 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.exceptions.llm_exceptions import LLMException
+from app.exceptions.stt_exceptions import STTServiceError
 from app.exceptions.tts_exceptions import TTSServiceError
 from app.exceptions.tts_exceptions import TTSAudioTooLargeError
 from app.exceptions.voice_conversation_exceptions import (
@@ -42,6 +44,7 @@ from app.services.chat_service import chat_service
 from app.services.stt_service import stt_service
 from app.services.tts_service import tts_service
 from app.services.vad_service import vad_service
+from app.services.tts_preferences import get_tts_preferences
 
 
 logger = logging.getLogger(__name__)
@@ -55,14 +58,19 @@ VALID_TRANSITIONS: dict[State, frozenset[State]] = {
         {State.SPEECH_DETECTED, State.STOPPING, State.ERROR}
     ),
     State.SPEECH_DETECTED: frozenset(
-        {State.TRANSCRIBING, State.STOPPING, State.ERROR}
+        {State.TRANSCRIBING, State.INTERRUPTED, State.STOPPING, State.ERROR}
     ),
     State.TRANSCRIBING: frozenset(
-        {State.PROCESSING, State.STOPPING, State.ERROR}
+        {State.PROCESSING, State.INTERRUPTED, State.STOPPING, State.ERROR}
     ),
-    State.PROCESSING: frozenset({State.SPEAKING, State.STOPPING, State.ERROR}),
+    State.PROCESSING: frozenset(
+        {State.SPEAKING, State.INTERRUPTED, State.STOPPING, State.ERROR}
+    ),
     State.SPEAKING: frozenset(
-        {State.FOLLOW_UP_LISTENING, State.STOPPING, State.ERROR}
+        {State.FOLLOW_UP_LISTENING, State.INTERRUPTED, State.STOPPING, State.ERROR}
+    ),
+    State.INTERRUPTED: frozenset(
+        {State.SPEECH_DETECTED, State.STOPPING, State.ERROR}
     ),
     State.FOLLOW_UP_LISTENING: frozenset(
         {State.SPEECH_DETECTED, State.IDLE, State.STOPPING, State.ERROR}
@@ -78,6 +86,7 @@ ACTIVE_STATES = frozenset(
         State.TRANSCRIBING,
         State.PROCESSING,
         State.SPEAKING,
+        State.INTERRUPTED,
         State.FOLLOW_UP_LISTENING,
     }
 )
@@ -106,6 +115,7 @@ class _VoiceSession:
     timeout_task: asyncio.Task | None = None
     timeout_token: int = 0
     turn_task: asyncio.Task | None = None
+    turn_generation: int = 0
     stopped: bool = False
     stop_reason: str | None = None
     error: str | None = None
@@ -117,6 +127,7 @@ class VoiceConversationManager:
     def __init__(self) -> None:
         self._sessions: dict[str, _VoiceSession] = {}
         self._registry_lock = asyncio.Lock()
+        self._cancelled_turn_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,7 +138,13 @@ class VoiceConversationManager:
         components = {
             "vad": bool(settings.VAD_ENABLED and vad_service.model_available()),
             "stt": bool(settings.STT_ENABLED and stt_service.model_available()),
-            "tts": bool(settings.TTS_ENABLED and tts_service.voice_available()),
+            "tts": bool(
+                settings.TTS_ENABLED
+                and (
+                    tts_service.voice_available()
+                    or tts_service.available_voices()
+                )
+            ),
             # Chat availability is determined per turn by the existing router.
             "chat": True,
         }
@@ -152,6 +169,8 @@ class VoiceConversationManager:
             ),
             "max_sessions": settings.VOICE_MAX_SESSIONS,
             "max_turn_audio_bytes": settings.VOICE_MAX_TURN_AUDIO_BYTES,
+            "barge_in_min_speech_seconds": settings.VOICE_BARGE_IN_MIN_SPEECH_SECONDS,
+            "barge_in_speech_threshold": settings.VOICE_BARGE_IN_SPEECH_THRESHOLD,
         }
 
     async def create_session(self, user_id: int) -> dict[str, Any]:
@@ -208,6 +227,7 @@ class VoiceConversationManager:
 
         session = await self._owned_session(session_id, user_id)
 
+        cancelled_turn: asyncio.Task | None = None
         async with session.lock:
             if vad_session_id:
                 session.vad_session_id = vad_session_id
@@ -216,7 +236,10 @@ class VoiceConversationManager:
                 if session.state not in (
                     State.LISTENING,
                     State.FOLLOW_UP_LISTENING,
+                    State.INTERRUPTED,
                 ):
+                    if session.state is State.SPEECH_DETECTED:
+                        return self._summary(session)
                     raise VoiceInvalidStateError(
                         "Speech cannot start in the current conversation state."
                     )
@@ -247,7 +270,34 @@ class VoiceConversationManager:
                 )
                 self._transition(session, State.ERROR)
 
-            return self._summary(session)
+            elif event is VoiceConversationEvent.BARGE_IN:
+                if session.state not in (
+                    State.SPEECH_DETECTED,
+                    State.TRANSCRIBING,
+                    State.PROCESSING,
+                    State.SPEAKING,
+                ):
+                    raise VoiceInvalidStateError(
+                        "Barge-in is not valid in the current conversation state."
+                    )
+                self._cancel_timeout(session)
+                session.follow_up_expires_at = None
+                session.follow_up_deadline = None
+                session.error = None
+                session.turn_generation += 1
+                cancelled_turn = session.turn_task
+                self._transition(session, State.INTERRUPTED)
+
+            summary = self._summary(session)
+
+        if cancelled_turn is not None and cancelled_turn is not asyncio.current_task():
+            self._cancel_turn_task(cancelled_turn)
+            async with session.lock:
+                if session.turn_task is cancelled_turn:
+                    session.turn_task = None
+                summary = self._summary(session)
+
+        return summary
 
     async def submit_turn(
         self,
@@ -259,6 +309,8 @@ class VoiceConversationManager:
     ) -> dict[str, Any]:
         """Run one completed VAD segment through STT, chat, and TTS."""
 
+        turn_started = time.perf_counter()
+        stt_ms = chat_ms = tts_ms = 0.0
         session = await self._owned_session(session_id, user_id)
 
         async with session.lock:
@@ -269,11 +321,15 @@ class VoiceConversationManager:
                 )
             if len(audio) > settings.VOICE_MAX_TURN_AUDIO_BYTES:
                 raise VoiceTurnError("The speech segment exceeds the size limit.")
+            session.turn_generation += 1
+            turn_generation = session.turn_generation
             self._transition(session, State.TRANSCRIBING)
             session.turn_task = asyncio.current_task()
 
         try:
             stt_result = await stt_service.transcribe(audio, "audio/wav")
+            stt_ms = float(stt_result.get("processing_ms") or 0.0)
+            self._ensure_current_turn(session, turn_generation)
             transcript = str(stt_result.get("text") or "").strip()
 
             if not stt_result.get("success") or len(transcript) < max(
@@ -286,15 +342,20 @@ class VoiceConversationManager:
 
             async with session.lock:
                 self._ensure_live(session)
+                self._ensure_current_turn(session, turn_generation)
                 self._transition(session, State.PROCESSING)
 
+            chat_started = time.perf_counter()
             chat_result = await chat_service.get_response(
                 prompt=transcript,
                 private=False,
                 user_id=user_id,
                 session=db,
                 conversation_id=session.conversation_id,
+                spoken_response=True,
             )
+            chat_ms = (time.perf_counter() - chat_started) * 1000
+            self._ensure_current_turn(session, turn_generation)
 
             assistant_response = str(chat_result.get("response") or "").strip()
             if not assistant_response:
@@ -306,6 +367,7 @@ class VoiceConversationManager:
 
             async with session.lock:
                 self._ensure_live(session)
+                self._ensure_current_turn(session, turn_generation)
                 conversation_id = chat_result.get("conversation_id")
                 if isinstance(conversation_id, int) and conversation_id > 0:
                     session.conversation_id = conversation_id
@@ -317,7 +379,15 @@ class VoiceConversationManager:
             tts_error: str | None = None
 
             try:
-                wav = await tts_service.synthesize(assistant_response)
+                voice_preferences = await get_tts_preferences(db, user_id)
+                tts_started = time.perf_counter()
+                wav = await tts_service.synthesize(
+                    assistant_response,
+                    voice_name=str(voice_preferences["voice"]),
+                    speed=float(voice_preferences["speed"]),
+                )
+                tts_ms = (time.perf_counter() - tts_started) * 1000
+                self._ensure_current_turn(session, turn_generation)
                 if len(wav) > settings.VOICE_MAX_TTS_AUDIO_BYTES:
                     raise VoiceTTSError("The generated speech audio was too large.")
                 audio_base64 = base64.b64encode(wav).decode("ascii")
@@ -349,6 +419,15 @@ class VoiceConversationManager:
                 self._touch(session)
                 response_base = self._summary(session)
 
+            logger.info(
+                "Voice turn timings stt_ms=%.1f chat_ms=%.1f tts_ms=%.1f "
+                "server_total_ms=%.1f",
+                stt_ms,
+                chat_ms,
+                tts_ms,
+                (time.perf_counter() - turn_started) * 1000,
+            )
+
             return {
                 **response_base,
                 "transcript": transcript,
@@ -369,6 +448,10 @@ class VoiceConversationManager:
         except Exception as error:
             if isinstance(error, (VoiceEmptyTranscriptionError, VoiceTurnError)):
                 public_error = str(error)
+            elif isinstance(error, STTServiceError):
+                public_error = str(error) or "Speech recognition failed. Please try speaking again."
+            elif isinstance(error, LLMException):
+                public_error = str(error) or "AI response generation failed. The conversation remains available."
             else:
                 public_error = (
                     "The voice turn could not be completed. "
@@ -379,8 +462,10 @@ class VoiceConversationManager:
                     session.error = public_error
                     self._transition(session, State.ERROR)
             logger.warning(
-                "Voice conversation turn failed (%s).",
+                "Voice conversation turn failed (%s): %s",
                 type(error).__name__,
+                error,
+                exc_info=True,
             )
             if isinstance(error, VoiceConversationError):
                 raise
@@ -413,6 +498,10 @@ class VoiceConversationManager:
         for session in sessions:
             await self._finalize(session, reason="shutdown")
 
+        pending = tuple(self._cancelled_turn_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     # ------------------------------------------------------------------
     # Internal state management
     # ------------------------------------------------------------------
@@ -431,13 +520,20 @@ class VoiceConversationManager:
             raise VoiceSessionError("The voice session is unavailable.")
 
     @staticmethod
+    def _ensure_current_turn(session: _VoiceSession, generation: int) -> None:
+        if session.stopped or session.turn_generation != generation:
+            raise asyncio.CancelledError
+
+    @staticmethod
     def _ensure_components() -> None:
         missing: list[str] = []
         if not settings.VAD_ENABLED or not vad_service.model_available():
             missing.append("voice activity detection")
         if not settings.STT_ENABLED or not stt_service.model_available():
             missing.append("speech-to-text")
-        if not settings.TTS_ENABLED or not tts_service.voice_available():
+        if not settings.TTS_ENABLED or not (
+            tts_service.voice_available() or tts_service.available_voices()
+        ):
             missing.append("text-to-speech")
         if missing:
             raise VoiceComponentUnavailableError(
@@ -523,11 +619,16 @@ class VoiceConversationManager:
                 self._transition(session, State.IDLE)
 
         if turn_task is not None and turn_task is not asyncio.current_task():
-            turn_task.cancel()
+            self._cancel_turn_task(turn_task)
 
         async with self._registry_lock:
             if self._sessions.get(session.session_id) is session:
                 self._sessions.pop(session.session_id, None)
+
+    def _cancel_turn_task(self, task: asyncio.Task) -> None:
+        self._cancelled_turn_tasks.add(task)
+        task.add_done_callback(self._cancelled_turn_tasks.discard)
+        task.cancel()
 
     async def _owned_session(
         self, session_id: str, user_id: int
@@ -555,7 +656,12 @@ class VoiceConversationManager:
                 or (
                     now - session.last_activity_monotonic > idle_timeout
                     and session.state
-                    in (State.LISTENING, State.FOLLOW_UP_LISTENING, State.ERROR)
+                    in (
+                        State.LISTENING,
+                        State.FOLLOW_UP_LISTENING,
+                        State.INTERRUPTED,
+                        State.ERROR,
+                    )
                 )
             ]
 

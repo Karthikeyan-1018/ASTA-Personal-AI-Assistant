@@ -35,7 +35,15 @@ class MemoryRetrievalRequest(BaseModel):
         le=50
     )
 
-    mode: Literal["keyword", "semantic"] = "keyword"
+    mode: Literal["keyword", "semantic", "hybrid"] = "keyword"
+
+    min_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0
+    )
+
+    allow_keyword_fallback: bool = False
 
     @field_validator("category")
     @classmethod
@@ -58,6 +66,8 @@ class RetrievedMemoryItem(BaseModel):
         ge=0.0,
         le=1.0
     )
+
+    id: int | None = None
 
 
 class MemoryRetrievalResponse(BaseModel):

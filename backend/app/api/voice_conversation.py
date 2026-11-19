@@ -5,6 +5,8 @@ VAD segment audio, observes backend state, and reports actual playback results;
 it never asserts its own conversation state or calls an LLM directly.
 """
 
+import asyncio
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.api.dependencies import get_current_user_id, require_csrf
@@ -175,6 +177,12 @@ async def submit_voice_turn(
 
     except VoiceTurnError as error:
         raise HTTPException(status_code=500, detail=str(error))
+
+    except asyncio.CancelledError:
+        raise HTTPException(
+            status_code=499,
+            detail="The voice turn was cancelled.",
+        )
 
     return VoiceTurnResponse(**result)
 

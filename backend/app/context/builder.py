@@ -351,7 +351,12 @@ class UnifiedContextBuilder:
                         category=str(
                             metadata.get("category") or "general"
                         ),
-                        relevance_score=entry.relevance
+                        relevance_score=entry.relevance,
+                        id=(
+                            int(metadata["id"])
+                            if metadata.get("id") is not None
+                            else None
+                        ),
                     )
                 )
 

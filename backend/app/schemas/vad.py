@@ -57,6 +57,7 @@ class VADFrameResponse(BaseModel):
     state: str
     speech_probability: float = Field(ge=0, le=1)
     speech_detected: bool
+    speech_duration_seconds: float = Field(default=0, ge=0)
     events: list[str]
     completed_segments: list[VADSegmentSummary]
     sample_position: int = Field(ge=0)

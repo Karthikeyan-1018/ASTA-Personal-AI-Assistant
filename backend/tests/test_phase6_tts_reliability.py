@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 import tracemalloc
 import unittest
 from types import SimpleNamespace
@@ -40,11 +41,17 @@ class Phase6TTSReliabilityTests(unittest.IsolatedAsyncioTestCase):
     """Bounded TTS generation with explicit, non-truncating failures."""
 
     async def test_01_short_response(self):
+        started = time.perf_counter()
         wav = await tts_service.synthesize("Short response works.")
+        elapsed_ms = (time.perf_counter() - started) * 1000
 
         self.assertTrue(_valid_wav(wav))
         self.assertGreater(len(wav), 44)
         self.assertLessEqual(len(wav), settings.VOICE_MAX_TTS_AUDIO_BYTES)
+        print(
+            "PHASE6_TTS_SHORT "
+            f"SYNTHESIS_MS={elapsed_ms:.1f} AUDIO_BYTES={len(wav)}"
+        )
 
     async def test_02_medium_response(self):
         text = "Local speech remains clear and bounded. " * 20

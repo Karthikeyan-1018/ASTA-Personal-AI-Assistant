@@ -29,6 +29,7 @@ from app.schemas.stt import (
     STT_OPAQUE_MEDIA_TYPES,
     SUPPORTED_STT_MEDIA_TYPES,
 )
+from app.services.blocking import run_blocking_to_completion
 
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ class STTService:
 
         try:
             try:
-                audio, duration_seconds = await asyncio.to_thread(
+                audio, duration_seconds = await run_blocking_to_completion(
                     self._decode_sync,
                     content,
                 )
@@ -147,7 +148,7 @@ class STTService:
                 model = await self._get_model()
 
                 try:
-                    result = await asyncio.to_thread(
+                    result = await run_blocking_to_completion(
                         self._transcribe_sync,
                         model,
                         audio,
@@ -196,7 +197,7 @@ class STTService:
                 try:
                     from faster_whisper import WhisperModel
 
-                    self._model = await asyncio.to_thread(
+                    self._model = await run_blocking_to_completion(
                         WhisperModel,
                         str(settings.STT_MODEL_DIR),
                         device=settings.STT_DEVICE,

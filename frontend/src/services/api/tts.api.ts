@@ -1,5 +1,10 @@
 import apiClient from './client';
-import type { TTSStatusResponse, TTSSynthesizeRequest } from '../../types/api.types';
+import type {
+  TTSSettingsResponse,
+  TTSSettingsUpdate,
+  TTSStatusResponse,
+  TTSSynthesizeRequest,
+} from '../../types/api.types';
 
 /**
  * Local Piper text-to-speech endpoints.
@@ -10,6 +15,19 @@ import type { TTSStatusResponse, TTSSynthesizeRequest } from '../../types/api.ty
 export const ttsApi = {
   async getStatus(): Promise<TTSStatusResponse> {
     const response = await apiClient.get<TTSStatusResponse>('/api/tts/status');
+    return response.data;
+  },
+
+  async getSettings(): Promise<TTSSettingsResponse> {
+    const response = await apiClient.get<TTSSettingsResponse>('/api/tts/settings');
+    return response.data;
+  },
+
+  async updateSettings(payload: TTSSettingsUpdate): Promise<TTSSettingsResponse> {
+    const response = await apiClient.put<TTSSettingsResponse>(
+      '/api/tts/settings',
+      payload,
+    );
     return response.data;
   },
 

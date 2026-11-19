@@ -161,6 +161,8 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
             "VOICE_MIN_TRANSCRIPT_CHARS",
             "VOICE_MAX_TURN_AUDIO_BYTES",
             "VOICE_MAX_TTS_AUDIO_BYTES",
+            "VOICE_BARGE_IN_MIN_SPEECH_SECONDS",
+            "VOICE_BARGE_IN_SPEECH_THRESHOLD",
         ):
             self.assertIn(name, config_text, name)
             self.assertIn(name, env, name)
@@ -175,6 +177,7 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
             "transcribing",
             "processing",
             "speaking",
+            "interrupted",
             "follow_up_listening",
             "stopping",
             "error",
@@ -345,6 +348,83 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
             follow_up["state"], VoiceConversationState.FOLLOW_UP_LISTENING
         )
         self.assertIsNotNone(follow_up["follow_up_expires_at"])
+
+    async def test_barge_in_stops_speaking_and_allows_the_new_turn(self):
+        session = await self._session()
+        await self._speech(session)
+        await self._turn(session)
+
+        interrupted = await self.manager.apply_event(
+            session["session_id"],
+            1,
+            VoiceConversationEvent.BARGE_IN,
+            "vad-session-2",
+        )
+        self.assertEqual(interrupted["state"], VoiceConversationState.INTERRUPTED)
+        with self.assertRaises(VoiceInvalidStateError):
+            await self.manager.apply_event(
+                session["session_id"],
+                1,
+                VoiceConversationEvent.PLAYBACK_COMPLETE,
+            )
+
+        speech = await self.manager.apply_event(
+            session["session_id"],
+            1,
+            VoiceConversationEvent.SPEECH_START,
+            "vad-session-2",
+        )
+        self.assertEqual(speech["state"], VoiceConversationState.SPEECH_DETECTED)
+        response = await self._turn(session)
+        self.assertEqual(response["state"], VoiceConversationState.SPEAKING)
+        self.assertEqual(self.chat_mock.await_count, 2)
+
+    async def test_barge_in_cancels_an_inflight_chat_turn(self):
+        session = await self._session()
+        await self._speech(session)
+        chat_started = asyncio.Event()
+
+        async def slow_chat(**_kwargs):
+            chat_started.set()
+            await asyncio.Event().wait()
+
+        self.chat_mock.side_effect = slow_chat
+        turn = asyncio.create_task(self._turn(session))
+        await asyncio.wait_for(chat_started.wait(), timeout=1)
+
+        interrupted = await self.manager.apply_event(
+            session["session_id"],
+            1,
+            VoiceConversationEvent.BARGE_IN,
+            "vad-session-2",
+        )
+        self.assertEqual(interrupted["state"], VoiceConversationState.INTERRUPTED)
+        with self.assertRaises(asyncio.CancelledError):
+            await turn
+        self.tts_mock.assert_not_awaited()
+
+    async def test_barge_in_cancels_an_inflight_tts_turn(self):
+        session = await self._session()
+        await self._speech(session)
+        tts_started = asyncio.Event()
+
+        async def slow_tts(*_args, **_kwargs):
+            tts_started.set()
+            await asyncio.Event().wait()
+
+        self.tts_mock.side_effect = slow_tts
+        turn = asyncio.create_task(self._turn(session))
+        await asyncio.wait_for(tts_started.wait(), timeout=1)
+
+        interrupted = await self.manager.apply_event(
+            session["session_id"],
+            1,
+            VoiceConversationEvent.BARGE_IN,
+            "vad-session-2",
+        )
+        self.assertEqual(interrupted["state"], VoiceConversationState.INTERRUPTED)
+        with self.assertRaises(asyncio.CancelledError):
+            await turn
 
     # 12 ------------------------------------------------------------------
     async def test_12_follow_up_timeout_finalizes_session(self):
@@ -596,6 +676,28 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
                 },
                 headers=headers,
             )
+            barge_in = await client.post(
+                f"/api/voice-conversations/sessions/{session_id}/events",
+                json={"event": "barge_in", "vad_session_id": "vad-api-next"},
+                headers=headers,
+            )
+            resumed = await client.post(
+                f"/api/voice-conversations/sessions/{session_id}/events",
+                json={"event": "speech_start", "vad_session_id": "vad-api-next"},
+                headers=headers,
+            )
+            turn_after_barge = await client.post(
+                f"/api/voice-conversations/sessions/{session_id}/turns",
+                data={"segment_id": "segment-api-next"},
+                files={
+                    "file": (
+                        "segment.wav",
+                        b"RIFF-real-next-segment",
+                        "audio/wav",
+                    )
+                },
+                headers=headers,
+            )
             playback = await client.post(
                 f"/api/voice-conversations/sessions/{session_id}/events",
                 json={"event": "playback_complete"},
@@ -611,10 +713,21 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created.status_code, 200)
         self.assertEqual(event.status_code, 200)
         self.assertEqual(turn.status_code, 200)
+        self.assertEqual(barge_in.status_code, 200)
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(turn_after_barge.status_code, 200)
         self.assertEqual(playback.status_code, 200)
         self.assertEqual(stopped.status_code, 200)
         self.assertEqual(turn.json()["transcript"], STT_RESULT["text"])
         self.assertTrue(turn.json()["audio_base64"])
+        self.assertEqual(
+            barge_in.json()["state"],
+            VoiceConversationState.INTERRUPTED.value,
+        )
+        self.assertEqual(
+            resumed.json()["state"],
+            VoiceConversationState.SPEECH_DETECTED.value,
+        )
         self.assertEqual(
             playback.json()["state"],
             VoiceConversationState.FOLLOW_UP_LISTENING.value,
@@ -639,8 +752,6 @@ class Phase18Stage4VoiceConversationTests(unittest.IsolatedAsyncioTestCase):
             "hey asta",
             "continuous_listening",
             "startcontinuous",
-            "barge_in",
-            "full_duplex",
             "groq",
             "ollama",
             "openai",

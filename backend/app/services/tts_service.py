@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import gc
 import wave
 from pathlib import Path
 from typing import Any
@@ -24,15 +25,15 @@ from app.exceptions.tts_exceptions import (
     TTSVoiceNotFoundError,
 )
 from app.schemas.tts import MAX_TTS_TEXT_CHARS
+from app.services.speech_normalizer import normalize_speech_text
+from app.services.blocking import run_blocking_to_completion
 
 
 logger = logging.getLogger(__name__)
 
 
-VOICE_NAME = "en_US-john-medium"
 VOICE_DIR = Path.home() / ".asta" / "tts" / "voices"
-MODEL_PATH = VOICE_DIR / f"{VOICE_NAME}.onnx"
-CONFIG_PATH = VOICE_DIR / f"{VOICE_NAME}.onnx.json"
+VOICE_NAME = settings.TTS_DEFAULT_VOICE
 
 # A slightly longer phoneme duration produces a calm, unhurried delivery
 # without adding a user-facing speed control that Piper does not need here.
@@ -59,46 +60,78 @@ class TTSService:
 
     def __init__(self) -> None:
         self._voice: Any | None = None
+        self._loaded_voice_name: str | None = None
         self._load_lock = asyncio.Lock()
         self._inference_slots = asyncio.Semaphore(1)
+        self.default_voice = settings.TTS_DEFAULT_VOICE
+        self.default_speed = settings.TTS_DEFAULT_SPEED
+        self._active_speed = self.default_speed
+
+    @staticmethod
+    def available_voices() -> list[str]:
+        """Return only complete voice models already installed locally."""
+
+        return sorted(
+            model.stem
+            for model in VOICE_DIR.glob("*.onnx")
+            if model.with_name(f"{model.name}.json").is_file()
+        )
 
     def status(self) -> dict[str, Any]:
         """Return a public status summary without exposing filesystem paths."""
 
         return {
             "enabled": settings.TTS_ENABLED,
-            "available": self.voice_available(),
-            "voice": VOICE_NAME,
+            "available": self.voice_available(self.default_voice),
+            "voice": self.default_voice,
+            "voices": self.available_voices(),
+            "speed": self.default_speed,
             "max_text_chars": MAX_TTS_TEXT_CHARS,
             "max_audio_bytes": settings.VOICE_MAX_TTS_AUDIO_BYTES,
         }
 
-    def voice_available(self) -> bool:
-        return MODEL_PATH.is_file() and CONFIG_PATH.is_file()
+    def voice_available(self, voice_name: str | None = None) -> bool:
+        name = voice_name or self.default_voice
+        return name in self.available_voices()
 
-    async def synthesize(self, text: str) -> bytes:
+    async def synthesize(
+        self,
+        text: str,
+        voice_name: str | None = None,
+        speed: float | None = None,
+    ) -> bytes:
         """Synthesize user-requested text into an in-memory WAV payload."""
 
         if not settings.TTS_ENABLED:
             raise TTSDisabledError("Text-to-speech is disabled.")
 
-        cleaned = text.strip()
-        if not cleaned:
+        original = text.strip()
+        if not original:
             raise TTSValidationError("Speech text must not be empty.")
-        if len(cleaned) > MAX_TTS_TEXT_CHARS:
+        if len(original) > MAX_TTS_TEXT_CHARS:
             raise TTSValidationError("Speech text exceeds the configured limit.")
-        if not self.voice_available():
+        selected_voice = voice_name or self.default_voice
+        selected_speed = self.default_speed if speed is None else float(speed)
+        if not 0.8 <= selected_speed <= 1.2:
+            raise TTSValidationError("Speech speed must be between 0.8 and 1.2.")
+        if not self.voice_available(selected_voice):
             raise TTSVoiceNotFoundError("The local speech voice is unavailable.")
+        cleaned = normalize_speech_text(original)
+        if not cleaned:
+            raise TTSValidationError("No speakable text remains after formatting cleanup.")
+        if len(cleaned) > MAX_TTS_TEXT_CHARS * 2:
+            raise TTSValidationError("Normalized speech text exceeds the configured limit.")
 
         max_audio_bytes = settings.VOICE_MAX_TTS_AUDIO_BYTES
         if max_audio_bytes <= 0:
             raise TTSValidationError("The speech audio size limit is invalid.")
 
         async with self._inference_slots:
-            voice = await self._get_voice()
+            voice = await self._get_voice(selected_voice)
+            self._active_speed = selected_speed
 
             try:
-                wav_bytes = await asyncio.to_thread(
+                wav_bytes = await run_blocking_to_completion(
                     self._synthesize_sync,
                     voice,
                     cleaned,
@@ -128,21 +161,27 @@ class TTSService:
 
         return wav_bytes
 
-    async def _get_voice(self) -> Any:
-        if self._voice is not None:
+    async def _get_voice(self, voice_name: str) -> Any:
+        if self._voice is not None and self._loaded_voice_name == voice_name:
             return self._voice
 
         async with self._load_lock:
-            if self._voice is None:
+            if self._voice is None or self._loaded_voice_name != voice_name:
                 try:
                     from piper import PiperVoice
 
-                    self._voice = await asyncio.to_thread(
+                    self._voice = None
+                    gc.collect()
+                    model_path = VOICE_DIR / f"{voice_name}.onnx"
+                    config_path = VOICE_DIR / f"{voice_name}.onnx.json"
+
+                    self._voice = await run_blocking_to_completion(
                         PiperVoice.load,
-                        MODEL_PATH,
-                        config_path=CONFIG_PATH,
+                        model_path,
+                        config_path=config_path,
                         use_cuda=False,
                     )
+                    self._loaded_voice_name = voice_name
 
                 except Exception as error:
                     logger.warning(
@@ -155,18 +194,34 @@ class TTSService:
 
         return self._voice
 
-    @staticmethod
-    def _synthesize_sync(voice: Any, text: str, max_bytes: int) -> bytes:
+    def _synthesize_sync(self, voice: Any, text: str, max_bytes: int) -> bytes:
         from piper import SynthesisConfig
 
         buffer = _BoundedBytesIO(max_bytes)
         with wave.open(buffer, "wb") as wav_file:
-            voice.synthesize_wav(
-                text,
-                wav_file,
-                syn_config=SynthesisConfig(length_scale=CALM_LENGTH_SCALE),
-                set_wav_format=True,
+            syn_config = SynthesisConfig(
+                length_scale=CALM_LENGTH_SCALE / self._active_speed
             )
+            pause_samples = 0
+            sample_width = 2
+            channels = 1
+            for chunk_index, chunk in enumerate(voice.synthesize(text, syn_config)):
+                if chunk_index == 0:
+                    wav_file.setframerate(chunk.sample_rate)
+                    wav_file.setsampwidth(chunk.sample_width)
+                    wav_file.setnchannels(chunk.sample_channels)
+                    sample_width = chunk.sample_width
+                    channels = chunk.sample_channels
+                    pause_samples = max(
+                        0,
+                        round(
+                            chunk.sample_rate
+                            * max(0.0, settings.TTS_SENTENCE_PAUSE_SECONDS)
+                        ),
+                    )
+                elif pause_samples:
+                    wav_file.writeframes(bytes(pause_samples * sample_width * channels))
+                wav_file.writeframes(chunk.audio_int16_bytes)
 
         return buffer.getvalue()
 

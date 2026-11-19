@@ -192,6 +192,7 @@ class ChatService:
         user_id: int | None,
         prompt: str,
         history: list,
+        spoken_response: bool = False,
     ) -> tuple[PersonalityConfig, str]:
         """Resolve the shared persona for this turn with safe degradation."""
 
@@ -213,6 +214,7 @@ class ChatService:
             config=state.config,
             user_message=prompt,
             history=history,
+            spoken_response=spoken_response,
         )
 
     @staticmethod
@@ -285,7 +287,8 @@ class ChatService:
         user_id: int | None = None,
         session: AsyncSession | None = None,
         memory_limit: int = CHAT_MEMORY_LIMIT,
-        conversation_id: int | None = None
+        conversation_id: int | None = None,
+        spoken_response: bool = False,
     ) -> dict:
 
         if not prompt or not prompt.strip():
@@ -390,6 +393,7 @@ class ChatService:
             user_id=user_id,
             prompt=cleaned_prompt,
             history=history,
+            spoken_response=spoken_response,
         )
 
         inspection = None
@@ -419,6 +423,7 @@ class ChatService:
         cache_eligible = (
             user_id is not None
             and session is not None
+            and not spoken_response
             and self._cache_eligible(
                 private=private,
                 classification=classification,

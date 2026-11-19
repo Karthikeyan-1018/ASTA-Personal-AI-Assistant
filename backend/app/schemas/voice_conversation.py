@@ -17,6 +17,7 @@ class VoiceConversationState(str, Enum):
     TRANSCRIBING = "transcribing"
     PROCESSING = "processing"
     SPEAKING = "speaking"
+    INTERRUPTED = "interrupted"
     FOLLOW_UP_LISTENING = "follow_up_listening"
     STOPPING = "stopping"
     ERROR = "error"
@@ -26,6 +27,7 @@ class VoiceConversationEvent(str, Enum):
     """Client observations that the backend may apply to its own state."""
 
     SPEECH_START = "speech_start"
+    BARGE_IN = "barge_in"
     PLAYBACK_COMPLETE = "playback_complete"
     PLAYBACK_FAILED = "playback_failed"
 
@@ -94,6 +96,8 @@ class VoiceStatusResponse(BaseModel):
     follow_up_timeout_seconds: float = Field(gt=0)
     max_sessions: int = Field(ge=1)
     max_turn_audio_bytes: int = Field(ge=1)
+    barge_in_min_speech_seconds: float = Field(gt=0)
+    barge_in_speech_threshold: float = Field(gt=0, le=1)
 
 
 class VoiceStopResponse(BaseModel):

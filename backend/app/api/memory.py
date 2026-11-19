@@ -18,7 +18,7 @@ from app.exceptions.memory_exceptions import (
     SemanticRetrievalUnavailable,
 )
 from app.memory.memory_extractor import memory_extractor
-from app.memory.memory_retriever import memory_retriever
+from app.memory.memory_retriever import RetrievalMode, memory_retriever
 from app.schemas.memory import (
     MemoryCreate,
     MemoryResponse,
@@ -208,11 +208,14 @@ async def retrieve_memories(
             query=payload.query,
             category=payload.category,
             limit=payload.limit,
-            mode=payload.mode
+            mode=RetrievalMode(payload.mode),
+            min_score=payload.min_score,
+            allow_keyword_fallback=payload.allow_keyword_fallback
         )
 
         memories = [
             RetrievedMemoryItem(
+                id=result.id,
                 content=result.content,
                 category=result.category,
                 relevance_score=result.relevance_score

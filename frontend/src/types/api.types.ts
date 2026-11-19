@@ -262,6 +262,8 @@ export interface MemoryResponse {
   status: BackendMemoryStatus;
   created_at: string;
   updated_at: string;
+  deduplicated?: boolean;
+  superseded?: boolean;
 }
 
 export interface MemoryRetrievalRequest {
@@ -269,9 +271,12 @@ export interface MemoryRetrievalRequest {
   category?: string | null;
   limit?: number;
   mode?: string;
+  min_score?: number | null;
+  allow_keyword_fallback?: boolean;
 }
 
 export interface RetrievedMemoryItem {
+  id: number | null;
   content: string;
   category: string;
   relevance_score: number;
@@ -599,7 +604,27 @@ export interface TTSStatusResponse {
   enabled: boolean;
   available: boolean;
   voice: string;
+  voices: string[];
+  speed: number;
   max_text_chars: number;
+  max_audio_bytes: number;
+}
+
+export interface TTSSettingsResponse {
+  voice: string;
+  speed: number;
+  default_voice: string;
+  installed_voices: string[];
+  enabled: boolean;
+  available: boolean;
+  max_text_chars: number;
+  max_audio_bytes: number;
+}
+
+export interface TTSSettingsUpdate {
+  voice?: string;
+  speed?: number;
+  reset?: boolean;
 }
 
 export interface TTSSynthesizeRequest {
@@ -671,6 +696,7 @@ export interface VADFrameResponse {
   state: string;
   speech_probability: number;
   speech_detected: boolean;
+  speech_duration_seconds: number;
   events: string[];
   completed_segments: VADSegmentSummary[];
   sample_position: number;
@@ -687,12 +713,14 @@ export type VoiceConversationState =
   | 'transcribing'
   | 'processing'
   | 'speaking'
+  | 'interrupted'
   | 'follow_up_listening'
   | 'stopping'
   | 'error';
 
 export type VoiceConversationEvent =
   | 'speech_start'
+  | 'barge_in'
   | 'playback_complete'
   | 'playback_failed';
 
@@ -706,6 +734,8 @@ export interface VoiceStatusResponse {
   follow_up_timeout_seconds: number;
   max_sessions: number;
   max_turn_audio_bytes: number;
+  barge_in_min_speech_seconds: number;
+  barge_in_speech_threshold: number;
 }
 
 export interface VoiceSessionResponse {

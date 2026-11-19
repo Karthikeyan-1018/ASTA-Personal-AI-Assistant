@@ -152,9 +152,13 @@ function voiceStateLabel(
       return 'speech detected';
     case 'transcribing':
     case 'processing':
-      return `${state} · mic released`;
+      return `${state} · mic ${micActive ? 'active' : 'unavailable'}`;
     case 'speaking':
-      return audioPlaying ? 'speaking · audio playing' : 'speaking · preparing audio';
+      return audioPlaying
+        ? `speaking · audio playing · mic ${micActive ? 'active' : 'unavailable'}`
+        : `speaking · preparing audio · mic ${micActive ? 'active' : 'unavailable'}`;
+    case 'interrupted':
+      return micActive ? 'interrupted · listening' : 'interrupted · mic unavailable';
     case 'follow_up_listening':
       return micActive
         ? 'follow-up listening · mic active'
@@ -175,7 +179,11 @@ function voiceStateDotClass(
 ): string {
   if (state === 'error') return 'bg-rose-400';
   if (state === 'speaking') return audioPlaying ? 'bg-indigo-400' : 'bg-slate-400';
-  if (state === 'listening' || state === 'follow_up_listening') {
+  if (
+    state === 'listening' ||
+    state === 'follow_up_listening' ||
+    state === 'interrupted'
+  ) {
     return micActive ? 'bg-emerald-400' : 'bg-slate-400';
   }
   return 'bg-amber-300';
@@ -747,7 +755,7 @@ export const Chat: React.FC = () => {
               )}
 
               {!isUser && !isCurrentlyStreaming && msg.content && (
-                <div className="flex items-center gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+                <div className="flex items-center gap-1 opacity-80 transition-opacity hover:opacity-100 sm:opacity-75 sm:group-hover:opacity-100">
                   {ttsAvailable &&
                     !voiceActive &&
                     (ttsSpeakingId === msg.id || ttsLoadingId === msg.id ? (
@@ -1051,33 +1059,33 @@ export const Chat: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => void voiceStop()}
-                    className="flex h-8 items-center gap-1.5 rounded-xl bg-rose-600 px-2.5 text-[11px] font-medium text-white shadow-md shadow-rose-600/30 transition hover:bg-rose-500"
+                    className="flex h-8 items-center gap-1.5 rounded-xl bg-rose-600 px-3 text-[11px] font-medium text-white shadow-md shadow-rose-600/30 transition hover:bg-rose-500 animate-pulse"
                     title="Stop voice conversation"
                     aria-label="Stop voice conversation"
                   >
                     <Square className="h-3 w-3 fill-current" />
-                    <span className="hidden sm:inline">Stop conversation</span>
+                    <span>Stop Voice</span>
                   </button>
                 ) : (
                   <button
                     type="button"
                     onClick={() => void voiceStart()}
                     disabled={voiceStartDisabled}
-                    className="flex h-8 items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-2.5 text-[11px] font-medium text-slate-300 transition hover:border-indigo-500/50 hover:bg-indigo-500/15 hover:text-indigo-200 disabled:opacity-40"
+                    className="flex h-8 items-center gap-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-3 text-[11px] font-medium text-indigo-200 transition hover:border-indigo-400 hover:bg-indigo-500/20 hover:text-white disabled:opacity-40"
                     title={
                       voiceEnabled === false || voiceAvailable === false
                         ? 'Local voice conversation is unavailable'
-                        : 'Start voice conversation'
+                        : 'Start live voice conversation with ASTA'
                     }
                     aria-label="Start voice conversation"
                   >
                     {voiceBusy ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : (
-                      <MessageSquare className="h-3.5 w-3.5" />
+                      <Volume2 className="h-3.5 w-3.5 text-indigo-300" />
                     )}
                     <span className="hidden sm:inline">
-                      {voiceBusy ? 'Starting' : 'Voice'}
+                      {voiceBusy ? 'Starting...' : 'Voice Chat'}
                     </span>
                   </button>
                 )}

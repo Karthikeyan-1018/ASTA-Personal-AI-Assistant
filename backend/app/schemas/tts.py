@@ -28,5 +28,26 @@ class TTSStatusResponse(BaseModel):
     enabled: bool
     available: bool
     voice: str
+    voices: list[str]
+    speed: float
+    max_text_chars: int
+    max_audio_bytes: int
+
+
+class TTSSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    voice: str | None = Field(default=None, min_length=1, max_length=120)
+    speed: float | None = Field(default=None, ge=0.8, le=1.2)
+    reset: bool = False
+
+
+class TTSSettingsResponse(BaseModel):
+    voice: str
+    speed: float
+    default_voice: str
+    installed_voices: list[str]
+    enabled: bool
+    available: bool
     max_text_chars: int
     max_audio_bytes: int

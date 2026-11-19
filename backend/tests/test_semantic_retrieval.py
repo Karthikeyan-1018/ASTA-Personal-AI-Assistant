@@ -702,16 +702,33 @@ class SemanticRetrievalTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [])
 
-    async def test_unsupported_mode_is_rejected(self):
+    async def test_hybrid_mode_is_supported(self):
 
-        with self.assertRaises(MemoryValidationError):
+        await self._add_memory(
+            "Career memory.",
+            category="career",
+            embedding=ALIGNED,
+        )
+
+        with patch.object(
+            embedding_service,
+            "embed_query",
+            new=AsyncMock(return_value=ALIGNED)
+        ):
             async with self.SessionLocal() as session:
-                await memory_retriever.retrieve(
+                results = await memory_retriever.retrieve(
                     session=session,
                     user_id=self.alice_id,
-                    query="query",
-                    mode="hybrid"
+                    query="career memory",
+                    mode="hybrid",
+                    similarity_threshold=0.0
                 )
+
+        self.assertEqual(
+            [item.content for item in results],
+            ["Career memory."]
+        )
+        self.assertIsNotNone(results[0].id)
 
     async def test_missing_embeddings_fallback_preserves_validation(self):
 

@@ -77,3 +77,5 @@ class MemoryResponse(BaseModel):
     status: MemoryStatus
     created_at: datetime
     updated_at: datetime
+    deduplicated: bool = False
+    superseded: bool = False

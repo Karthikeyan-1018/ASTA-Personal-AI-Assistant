@@ -19,6 +19,12 @@ export type VADStatus =
 /** Optional observers used only by an explicit Stage 4 voice conversation. */
 export interface VADCallbacks {
   onSpeechStart?: (vadSessionId: string) => void;
+  onSpeechActivity?: (
+    vadSessionId: string,
+    active: boolean,
+    probability: number,
+    durationSeconds: number,
+  ) => void;
   onSegmentComplete?: (
     segment: VADSegmentSummary,
     vadSessionId: string,
@@ -166,6 +172,14 @@ async function pump(token: number): Promise<void> {
 
         // Real model events only. Stage 4 observers receive the actual VAD
         // session id so they can fetch the real segment WAV before teardown.
+        if (currentSessionId) {
+          callbacks?.onSpeechActivity?.(
+            currentSessionId,
+            response.speech_detected,
+            response.speech_probability,
+            response.speech_duration_seconds,
+          );
+        }
         if (response.events.includes('speech_start') && currentSessionId) {
           callbacks?.onSpeechStart?.(currentSessionId);
         }
@@ -259,7 +273,7 @@ export const useVADStore = create<VADStoreState>((set, get) => ({
 
   start: async (stream: MediaStream) => {
     get().cancel();
-    const token = generation;
+    const token = ++generation;
 
     resamplerReady = false;
     resamplerPhase = 0;

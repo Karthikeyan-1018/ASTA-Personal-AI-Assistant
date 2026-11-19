@@ -183,7 +183,10 @@ class MemoryContextProvider:
                 source=self.source,
                 content=memory.content,
                 relevance=float(memory.relevance_score),
-                metadata={"category": memory.category}
+                metadata={
+                    "id": getattr(memory, "id", None),
+                    "category": memory.category,
+                }
             )
             for memory in memories
         ]

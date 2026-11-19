@@ -9,8 +9,8 @@ import type {
 export const VAD_SAMPLE_RATE = 16000;
 export const VAD_FRAME_SAMPLES = 512;
 
-/** One HTTP batch is 16 frames (0.512 s), keeping requests bounded. */
-export const VAD_BATCH_FRAMES = 16;
+/** One HTTP batch is 8 frames (0.256 s) for responsive speech and barge-in. */
+export const VAD_BATCH_FRAMES = 8;
 export const VAD_BATCH_SAMPLES = VAD_FRAME_SAMPLES * VAD_BATCH_FRAMES;
 export const VAD_TIMEOUT_MS = 15000;
 

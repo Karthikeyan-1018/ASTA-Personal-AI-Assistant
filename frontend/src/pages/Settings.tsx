@@ -10,17 +10,20 @@ import {
   RotateCcw,
   Check,
   Sparkles,
+  Volume2,
 } from 'lucide-react';
 import { useSettingsStore } from '../stores/settings.store';
 import { useAuthStore } from '../stores/auth.store';
 import NotificationPreferencesPanel from '../components/settings/NotificationPreferencesPanel';
 import PersonalityPanel from '../components/settings/PersonalityPanel';
+import VoiceSettingsPanel from '../components/settings/VoiceSettingsPanel';
 import type { UserSettings } from '../types/settings.types';
 
 type SettingsTab =
   | 'general'
   | 'appearance'
   | 'chat'
+  | 'voice'
   | 'notifications'
   | 'privacy'
   | 'security'
@@ -47,6 +50,7 @@ export const Settings: React.FC = () => {
     { id: 'general', label: 'General', icon: User },
     { id: 'appearance', label: 'Appearance', icon: Palette },
     { id: 'chat', label: 'Chat Preferences', icon: MessageSquare },
+    { id: 'voice', label: 'Voice', icon: Volume2 },
     { id: 'notifications', label: 'Notifications', icon: Bell },
     { id: 'privacy', label: 'Privacy', icon: Lock },
     { id: 'security', label: 'Security & Tools', icon: Shield },
@@ -164,6 +168,8 @@ export const Settings: React.FC = () => {
               </div>
             </div>
           )}
+
+          {activeTab === 'voice' && <VoiceSettingsPanel />}
 
           {/* APPEARANCE TAB */}
           {activeTab === 'appearance' && (

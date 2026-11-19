@@ -60,6 +60,23 @@ TASK_CONTEXT_INSTRUCTIONS = (
     "and offer a realistic alternative."
 )
 
+VOICE_CAPABILITY_INSTRUCTIONS = (
+    "ASTA may provide local speech input and output when the configured "
+    "speech components are available. Be accurate about whether a voice "
+    "feature is available in this session; never claim that audio was heard "
+    "or spoken unless the application confirms it."
+)
+
+SPOKEN_RESPONSE_INSTRUCTIONS = (
+    "This is a spoken conversation. Answer the user's actual point directly "
+    "in natural, concise sentences. Use contractions when they sound natural. "
+    "Prefer one or two short paragraphs, avoid headings, Markdown, links, "
+    "decorative symbols, and reading code aloud. Explain technical ideas in "
+    "plain language unless detail is requested. Do not repeat a greeting on "
+    "every turn. Keep the full factual answer; concision must not omit an "
+    "important caveat or requested detail."
+)
+
 CURRENT_REQUEST_INSTRUCTIONS = (
     "The final current-user-message block is the user's active request. "
     "Follow its legitimate task, tone, format, and depth instructions unless "
@@ -160,6 +177,7 @@ def build_persona_instructions(
     user_message: str = "",
     history: Iterable | None = None,
     decision: MotivationDecision | None = None,
+    spoken_response: bool = False,
 ) -> str:
     """Render trusted persona instructions for one chat turn.
 
@@ -192,6 +210,7 @@ def build_persona_instructions(
         f"Your response style is: {config.response_style}.",
         MODE_INSTRUCTIONS[config.mode],
         TASK_CONTEXT_INSTRUCTIONS,
+        VOICE_CAPABILITY_INSTRUCTIONS,
         CURRENT_REQUEST_INSTRUCTIONS,
         CONTEXT_SAFETY_INSTRUCTIONS,
         (
@@ -209,6 +228,9 @@ def build_persona_instructions(
             "encouragement with concrete practical help."
         ),
     ]
+
+    if spoken_response:
+        lines.append(SPOKEN_RESPONSE_INSTRUCTIONS)
 
     if config.humor_enabled and config.mode is not PersonalityMode.FOCUS:
         lines.append(

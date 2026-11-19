@@ -66,6 +66,7 @@ export const voiceConversationApi = {
     sessionId: string,
     audio: ArrayBuffer,
     segmentId: string,
+    signal?: AbortSignal,
   ): Promise<VoiceTurnResponse> {
     const form = new FormData();
     form.append('file', new Blob([audio], { type: 'audio/wav' }), 'segment.wav');
@@ -77,6 +78,7 @@ export const voiceConversationApi = {
       {
         headers: { 'Content-Type': undefined },
         timeout: VOICE_REQUEST_TIMEOUT_MS,
+        signal,
       },
     );
     return response.data;

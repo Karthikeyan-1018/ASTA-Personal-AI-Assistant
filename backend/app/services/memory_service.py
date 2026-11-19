@@ -21,6 +21,28 @@ MAX_CATEGORY_LENGTH = 50
 DEFAULT_CATEGORY = "general"
 
 
+def _normalise_memory_text(value: str) -> str:
+    """Collapse whitespace and case for duplicate comparisons."""
+
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _memory_key(content: str) -> str:
+    """Return the stable subject of a ``Key: value`` memory.
+
+    Memories without an explicit key are compared only by their full content,
+    so an ordinary sentence can never supersede an unrelated memory.
+    """
+
+    cleaned = str(content or "").strip()
+    separator = cleaned.find(":")
+
+    if separator <= 0:
+        return _normalise_memory_text(cleaned)
+
+    return _normalise_memory_text(cleaned[:separator])
+
+
 # ``SECRET_PATTERNS`` is re-exported for backwards compatibility. Its single
 # definition lives in ``app.core.secret_patterns``.
 
@@ -73,10 +95,72 @@ class MemoryService:
         category: str = DEFAULT_CATEGORY
     ) -> Memory:
 
+        cleaned_content = _validate_content(content)
+        cleaned_category = _normalise_category(category)
+        content_key = _normalise_memory_text(cleaned_content)
+        subject_key = _memory_key(cleaned_content)
+
+        result = await session.execute(
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.status.in_(
+                    [MemoryStatus.PENDING, MemoryStatus.APPROVED]
+                )
+            ).order_by(Memory.id.asc())
+        )
+        existing = list(result.scalars().all())
+
+        for memory in existing:
+            if _normalise_memory_text(memory.content) == content_key:
+                memory.deduplicated = True
+                memory.superseded = False
+                return memory
+
+        superseded: Memory | None = None
+
+        if len(subject_key) >= 3:
+            candidates = [
+                memory
+                for memory in existing
+                if _memory_key(memory.content) == subject_key
+                and _normalise_memory_text(memory.content) != content_key
+            ]
+
+            if candidates:
+                superseded = candidates[-1]
+
+        if superseded is not None:
+            superseded.content = cleaned_content
+            superseded.category = cleaned_category
+
+            try:
+                await session.commit()
+                await session.refresh(superseded)
+
+            except Exception:
+                await session.rollback()
+                logger.exception(
+                    "Failed to supersede memory %s for user %s.",
+                    superseded.id,
+                    user_id
+                )
+                raise
+
+            superseded.deduplicated = False
+            superseded.superseded = True
+
+            await self._refresh_embedding_if_enabled(
+                session=session,
+                memory=superseded,
+                force=True
+            )
+
+            return superseded
+
         memory = Memory(
             user_id=user_id,
-            content=_validate_content(content),
-            category=_normalise_category(category),
+            content=cleaned_content,
+            category=cleaned_category,
             status=MemoryStatus.PENDING
         )
 
@@ -92,6 +176,9 @@ class MemoryService:
                 user_id
             )
             raise
+
+        memory.deduplicated = False
+        memory.superseded = False
 
         return memory
 

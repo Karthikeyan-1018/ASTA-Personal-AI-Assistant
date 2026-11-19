@@ -141,7 +141,7 @@ class MemoryRetrievalAPITests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             set(item.keys()),
-            {"content", "category", "relevance_score"}
+            {"id", "content", "category", "relevance_score"}
         )
         self.assertEqual(
             item["content"],

@@ -18,6 +18,12 @@ let activeStream: MediaStream | null = null;
 let activeAudio: HTMLAudioElement | null = null;
 let activeObjectUrl: string | null = null;
 let generation = 0;
+let turnGeneration = 0;
+let activeTurnAbort: AbortController | null = null;
+let cancelActivePlayback: (() => void) | null = null;
+let pendingBargeIn: Promise<void> | null = null;
+let bargeCandidateVadSessionId: string | null = null;
+let bargeTriggeredVadSessionId: string | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const processedSegments = new Set<string>();
 
@@ -30,7 +36,7 @@ function microphoneError(error: unknown): string {
   switch (name) {
     case 'NotAllowedError':
     case 'PermissionDeniedError':
-      return 'Microphone permission was denied. Allow access in your browser settings and try again.';
+      return 'Microphone permission was denied. Allow access in your browser settings (click the lock/site settings icon in the address bar -> Microphone -> Allow) and reload.';
     case 'NotFoundError':
     case 'DevicesNotFoundError':
       return 'No microphone was found on this device.';
@@ -43,8 +49,12 @@ function microphoneError(error: unknown): string {
 }
 
 function readableError(error: unknown, fallback: string): string {
-  const message = error instanceof Error ? error.message.trim() : '';
-  return message || fallback;
+  if (typeof error === 'object' && error !== null) {
+    const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail.trim();
+    if (error instanceof Error && error.message.trim()) return error.message.trim();
+  }
+  return fallback;
 }
 
 function remainingSeconds(expiresAt: string | null): number | null {
@@ -72,6 +82,8 @@ interface VoiceConversationStoreState {
   followUpExpiresAt: string | null;
   followUpRemainingSeconds: number | null;
   followUpTimeoutSeconds: number;
+  bargeInMinSpeechSeconds: number;
+  bargeInSpeechThreshold: number;
   busy: boolean;
   micActive: boolean;
   audioPlaying: boolean;
@@ -105,6 +117,7 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
     }
 
     function releaseAudio(): void {
+      cancelActivePlayback = null;
       if (activeAudio) {
         activeAudio.pause();
         activeAudio.onplaying = null;
@@ -156,6 +169,12 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
 
     /** Release every local resource without asserting a new backend state. */
     function releaseLocalSession(message: string | null = null): void {
+      turnGeneration += 1;
+      activeTurnAbort?.abort();
+      activeTurnAbort = null;
+      pendingBargeIn = null;
+      bargeCandidateVadSessionId = null;
+      bargeTriggeredVadSessionId = null;
       stopPolling();
       suspendMicrophone();
       releaseAudio();
@@ -197,13 +216,91 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
     function installVadCallbacks(): void {
       const callbacks: VADCallbacks = {
         onSpeechStart: (vadSessionId) => {
+          const current = get().state;
+          if (
+            ['transcribing', 'processing', 'speaking'].includes(current) ||
+            (get().busy && current !== 'interrupted')
+          ) {
+            bargeCandidateVadSessionId = vadSessionId;
+            return;
+          }
+          if (current === 'interrupted') return;
+          bargeCandidateVadSessionId = null;
           void get().reportSpeechStart(vadSessionId);
+        },
+        onSpeechActivity: (vadSessionId, active, probability, durationSeconds) => {
+          const current = get().state;
+          if (
+            !active ||
+            (!['transcribing', 'processing', 'speaking'].includes(current) &&
+              !(get().busy && current !== 'interrupted')) ||
+            bargeCandidateVadSessionId !== vadSessionId ||
+            bargeTriggeredVadSessionId === vadSessionId ||
+            !Number.isFinite(probability) ||
+            probability < get().bargeInSpeechThreshold ||
+            !Number.isFinite(durationSeconds) ||
+            durationSeconds < get().bargeInMinSpeechSeconds
+          ) {
+            return;
+          }
+          bargeTriggeredVadSessionId = vadSessionId;
+          beginBargeIn(vadSessionId);
         },
         onSegmentComplete: (segment, vadSessionId) => {
           void get().submitSegment(segment, vadSessionId);
         },
       };
       useVADStore.getState().setCallbacks(callbacks);
+    }
+
+    function beginBargeIn(vadSessionId: string): void {
+      if (pendingBargeIn) return;
+      const sessionId = get().sessionId;
+      if (!sessionId) return;
+
+      turnGeneration += 1;
+      cancelActivePlayback?.();
+      set({ state: 'interrupted', audioPlaying: false, busy: false, error: null });
+
+      pendingBargeIn = (async () => {
+        try {
+          const session = await voiceConversationApi.sendEvent(
+            sessionId,
+            'barge_in',
+            vadSessionId,
+          );
+          if (get().sessionId === sessionId) applyBackendSession(session);
+          activeTurnAbort?.abort();
+          activeTurnAbort = null;
+        } catch (error) {
+          // Playback completion can win a close race with the VAD request.
+          // In that case, the user speech is a normal follow-up turn.
+          try {
+            const session = await voiceConversationApi.getSession(sessionId);
+            if (
+              session.state === 'follow_up_listening' ||
+              session.state === 'listening'
+            ) {
+              const listening = await voiceConversationApi.sendEvent(
+                sessionId,
+                'speech_start',
+                vadSessionId,
+              );
+              if (get().sessionId === sessionId) applyBackendSession(listening);
+              return;
+            }
+          } catch {
+            // Surface the original state-change error below.
+          }
+          if (get().sessionId === sessionId) {
+            set({
+              error: readableError(error, 'The interruption could not be registered.'),
+            });
+          }
+        } finally {
+          pendingBargeIn = null;
+        }
+      })();
     }
 
     async function acquireMicrophone(token: number): Promise<boolean> {
@@ -218,9 +315,23 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         return false;
       }
 
+      if (activeStream) {
+        installVadCallbacks();
+        await useVADStore.getState().start(activeStream);
+        const micActive = useVADStore.getState().active;
+        if (token === generation) set({ micActive });
+        return micActive;
+      }
+
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: { ideal: true },
+            noiseSuppression: { ideal: true },
+            autoGainControl: { ideal: true },
+          },
+        });
       } catch (error) {
         if (token === generation) set({ error: microphoneError(error) });
         return false;
@@ -256,19 +367,24 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
       if (!sessionId) return;
 
       const token = generation;
+      const turnToken = turnGeneration;
       try {
         const session = await voiceConversationApi.sendEvent(
           sessionId,
           event,
         );
-        if (token !== generation) return;
+        if (token !== generation || turnToken !== turnGeneration) return;
         applyBackendSession(session);
 
         if (
           event === 'playback_complete' &&
           session.state === 'follow_up_listening'
         ) {
-          await acquireMicrophone(token);
+          if (useVADStore.getState().active) {
+            set({ micActive: true });
+          } else {
+            await acquireMicrophone(token);
+          }
         } else if (event === 'playback_failed') {
           // The backend keeps the response in the conversation but moves the
           // session to error. Explicitly reclaim it before clearing local state.
@@ -284,7 +400,7 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
           }
         }
       } catch (error) {
-        if (token === generation) {
+        if (token === generation && turnToken === turnGeneration) {
           set({
             error: readableError(
               error,
@@ -318,10 +434,16 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         ): void => {
           if (settled) return;
           settled = true;
+          if (cancelActivePlayback === cancelPlayback) {
+            cancelActivePlayback = null;
+          }
           releaseAudio();
           resolve();
           if (token === generation && event) void reportPlaybackEvent(event);
         };
+
+        const cancelPlayback = (): void => finish();
+        cancelActivePlayback = cancelPlayback;
 
         audio.onplaying = () => {
           if (token === generation) set({ audioPlaying: true });
@@ -344,6 +466,8 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
       followUpExpiresAt: null,
       followUpRemainingSeconds: null,
       followUpTimeoutSeconds: 10,
+      bargeInMinSpeechSeconds: 0.25,
+      bargeInSpeechThreshold: 0.65,
       busy: false,
       micActive: false,
       audioPlaying: false,
@@ -358,6 +482,8 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
             enabled: status.enabled,
             available: status.available,
             followUpTimeoutSeconds: status.follow_up_timeout_seconds,
+            bargeInMinSpeechSeconds: status.barge_in_min_speech_seconds,
+            bargeInSpeechThreshold: status.barge_in_speech_threshold,
           });
         } catch (error) {
           set({
@@ -393,6 +519,8 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
             enabled: status.enabled,
             available: status.available,
             followUpTimeoutSeconds: status.follow_up_timeout_seconds,
+            bargeInMinSpeechSeconds: status.barge_in_min_speech_seconds,
+            bargeInSpeechThreshold: status.barge_in_speech_threshold,
           });
 
           if (!status.enabled || !status.available) {
@@ -421,7 +549,11 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
           }
 
           const stream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
+            audio: {
+              echoCancellation: { ideal: true },
+              noiseSuppression: { ideal: true },
+              autoGainControl: { ideal: true },
+            },
           });
           // Own the stream immediately so every subsequent failure path can
           // release the microphone without a special case.
@@ -444,6 +576,10 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
 
           activeStream = stream;
           processedSegments.clear();
+          turnGeneration += 1;
+          pendingBargeIn = null;
+          bargeCandidateVadSessionId = null;
+          bargeTriggeredVadSessionId = null;
           setVoiceConversationActive(true);
           installVadCallbacks();
           await useVADStore.getState().start(stream);
@@ -491,6 +627,10 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
       stop: async () => {
         const sessionId = get().sessionId;
         generation += 1;
+        turnGeneration += 1;
+        activeTurnAbort?.abort();
+        activeTurnAbort = null;
+        cancelActivePlayback?.();
         releaseLocalSession();
 
         if (!sessionId) return;
@@ -507,9 +647,10 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         if (!sessionId) return;
 
         const token = generation;
+        const turnToken = turnGeneration;
         try {
           const session = await voiceConversationApi.getSession(sessionId);
-          if (token !== generation) return;
+          if (token !== generation || turnToken !== turnGeneration) return;
           applyBackendSession(session);
         } catch (error) {
           if (token !== generation) return;
@@ -525,15 +666,18 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         if (!sessionId) return;
 
         const token = generation;
+        const turnToken = turnGeneration;
         try {
           const session = await voiceConversationApi.sendEvent(
             sessionId,
             'speech_start',
             vadSessionId,
           );
-          if (token === generation) applyBackendSession(session);
+          if (token === generation && turnToken === turnGeneration) {
+            applyBackendSession(session);
+          }
         } catch (error) {
-          if (token === generation) {
+          if (token === generation && turnToken === turnGeneration) {
             set({
               error: readableError(
                 error,
@@ -551,16 +695,20 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         processedSegments.add(segment.segment_id);
 
         const token = generation;
+        const turnToken = ++turnGeneration;
         set({ busy: true, error: null });
 
         try {
+          if (pendingBargeIn) await pendingBargeIn;
+          if (token !== generation || turnToken !== turnGeneration) return;
+
           if (get().state !== 'speech_detected') {
             const speechSession = await voiceConversationApi.sendEvent(
               sessionId,
               'speech_start',
               vadSessionId,
             );
-            if (token !== generation) return;
+            if (token !== generation || turnToken !== turnGeneration) return;
             applyBackendSession(speechSession);
             if (speechSession.state !== 'speech_detected') {
               throw new Error(
@@ -575,15 +723,32 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
             vadSessionId,
             segment.segment_id,
           );
-          if (token !== generation) return;
-          suspendMicrophone();
+          if (token !== generation || turnToken !== turnGeneration) return;
 
-          const response = await voiceConversationApi.submitTurn(
+          const stream = activeStream;
+          if (!stream) throw new Error('The voice microphone is no longer active.');
+          const controller = new AbortController();
+          activeTurnAbort = controller;
+          set({ state: 'transcribing', micActive: true });
+          const responsePromise = voiceConversationApi.submitTurn(
             sessionId,
             audio,
             segment.segment_id,
+            controller.signal,
           );
-          if (token !== generation) return;
+
+          // Rotate the bounded server VAD session after each captured segment,
+          // while retaining the same echo-cancelled microphone stream.
+          installVadCallbacks();
+          await useVADStore.getState().start(stream);
+          const micActive = useVADStore.getState().active;
+          if (token === generation && turnToken === turnGeneration) {
+            set({ micActive });
+          }
+
+          const response = await responsePromise;
+          if (activeTurnAbort === controller) activeTurnAbort = null;
+          if (token !== generation || turnToken !== turnGeneration) return;
 
           set({
             lastTurn: response,
@@ -595,7 +760,7 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
             await playTurnAudio(response, token);
           }
         } catch (error) {
-          if (token === generation) {
+          if (token === generation && turnToken === turnGeneration) {
             set({
               error: readableError(
                 error,
@@ -604,7 +769,10 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
             });
           }
         } finally {
-          if (token === generation) set({ busy: false });
+          if (token === generation && turnToken === turnGeneration) {
+            set({ busy: false });
+            activeTurnAbort = null;
+          }
         }
       },
 

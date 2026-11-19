@@ -2,9 +2,9 @@
 
 Keyword retrieval remains the deterministic default. Semantic retrieval uses
 pgvector cosine distance when PostgreSQL/pgvector is available and an
-application-side cosine fallback for portable test databases. The public
-retrieval API keeps the existing keyword behaviour unless semantic mode is
-explicitly requested.
+application-side cosine fallback for portable test databases. Hybrid retrieval
+blends both ranked candidate lists. The public retrieval API keeps the existing
+keyword behaviour unless another mode is explicitly requested.
 """
 
 import enum
@@ -45,6 +45,7 @@ class RetrievalMode(str, enum.Enum):
 
     KEYWORD = "keyword"
     SEMANTIC = "semantic"
+    HYBRID = "hybrid"
 
 # Relevance = KEYWORD_WEIGHT * query keyword coverage
 #           + CATEGORY_WEIGHT * category match
@@ -243,12 +244,92 @@ class RetrievedMemory:
     content: str
     category: str
     relevance_score: float
+    id: int | None = None
+
+
+def _result_key(item: RetrievedMemory) -> tuple[str, str]:
+    """Return the duplicate-suppression key for one ranked result."""
+
+    return (
+        " ".join((item.content or "").split()).casefold(),
+        _normalise_category(item.category or ""),
+    )
+
+
+def _filter_retrieval_results(
+    results: list[RetrievedMemory],
+    *,
+    min_score: float | None = None,
+    limit: int | None = None
+) -> list[RetrievedMemory]:
+    """Apply a score floor and suppress duplicates before the final limit.
+
+    A database id suppresses repeated candidates from multiple ranking paths;
+    identical text in the same category is then collapsed once. Ranking inputs
+    are already sorted, so keeping the first occurrence preserves the strongest
+    score.
+    """
+
+    threshold = None
+
+    if min_score is not None:
+        try:
+            threshold = max(0.0, min(1.0, float(min_score)))
+        except (TypeError, ValueError):
+            raise MemoryValidationError(
+                "Minimum score must be between 0.0 and 1.0."
+            ) from None
+
+    seen_content: set[tuple[str, str]] = set()
+    seen_ids: set[int] = set()
+    filtered: list[RetrievedMemory] = []
+
+    for item in results or []:
+        score = max(0.0, min(1.0, float(item.relevance_score or 0.0)))
+
+        if threshold is not None and score < threshold:
+            continue
+
+        if item.id is not None:
+            if item.id in seen_ids:
+                continue
+            seen_ids.add(item.id)
+
+        key = _result_key(item)
+
+        if key in seen_content:
+            continue
+
+        seen_content.add(key)
+        filtered.append(
+            RetrievedMemory(
+                content=item.content,
+                category=item.category,
+                relevance_score=round(score, 4),
+                id=item.id,
+            )
+        )
+
+    filtered.sort(
+        key=lambda item: (
+            -item.relevance_score,
+            (item.content or "").casefold(),
+            item.category or "",
+            item.id or 0,
+        )
+    )
+
+    if limit is not None:
+        return filtered[:limit]
+
+    return filtered
 
 
 def rank_memories(
     memories: list[Memory],
     query: str,
-    limit: int = DEFAULT_RESULT_LIMIT
+    limit: int = DEFAULT_RESULT_LIMIT,
+    min_score: float | None = None
 ) -> list[RetrievedMemory]:
     """Rank approved memories against a query using local scoring.
 
@@ -295,20 +376,28 @@ def rank_memories(
 
     scored.sort(key=lambda item: (-item[0], item[1].id))
 
-    return [
+    candidates = [
         RetrievedMemory(
             content=memory.content,
             category=memory.category,
-            relevance_score=score
+            relevance_score=score,
+            id=memory.id
         )
-        for score, memory in scored[:limit]
+        for score, memory in scored
     ]
+
+    return _filter_retrieval_results(
+        candidates,
+        min_score=min_score,
+        limit=limit
+    )
 
 
 def _blend_retrieval_results(
     semantic: list[RetrievedMemory],
     keyword: list[RetrievedMemory],
-    limit: int
+    limit: int,
+    min_score: float | None = None
 ) -> list[RetrievedMemory]:
     """Combine semantic and keyword candidates into one ranked list.
 
@@ -347,15 +436,26 @@ def _blend_retrieval_results(
                 {
                     "content": content,
                     "category": item.category,
+                    "id": item.id,
                     "semantic": 0.0,
                     "keyword": 0.0,
                 }
             )
 
+            if entry["id"] is None and item.id is not None:
+                entry["id"] = item.id
+
             score = max(0.0, min(1.0, float(item.relevance_score or 0.0)))
             entry[source] = max(entry[source], score)
 
     minimum = max(0.0, min(1.0, float(settings.AI_MEMORY_MIN_HYBRID_SCORE)))
+
+    if min_score is not None:
+        minimum = max(
+            minimum,
+            max(0.0, min(1.0, float(min_score)))
+        )
+
     results: list[RetrievedMemory] = []
 
     for entry in combined.values():
@@ -371,19 +471,16 @@ def _blend_retrieval_results(
             RetrievedMemory(
                 content=entry["content"],
                 category=entry["category"],
-                relevance_score=round(min(score, 1.0), 4)
+                relevance_score=round(min(score, 1.0), 4),
+                id=entry["id"],
             )
         )
 
-    results.sort(
-        key=lambda item: (
-            -item.relevance_score,
-            item.content.casefold(),
-            item.category or "",
-        )
+    return _filter_retrieval_results(
+        results,
+        min_score=minimum,
+        limit=limit
     )
-
-    return results[:limit]
 
 
 class MemoryRetriever:
@@ -432,7 +529,8 @@ class MemoryRetriever:
         user_id: int,
         query: str,
         category: str | None = None,
-        limit: int = DEFAULT_RESULT_LIMIT
+        limit: int = DEFAULT_RESULT_LIMIT,
+        min_score: float | None = None
     ) -> list[RetrievedMemory]:
         """Retrieve memories using the existing deterministic keyword scorer."""
 
@@ -459,7 +557,8 @@ class MemoryRetriever:
         return rank_memories(
             memories=memories,
             query=cleaned_query,
-            limit=limit
+            limit=limit,
+            min_score=min_score
         )
 
     async def retrieve_semantic(
@@ -469,7 +568,8 @@ class MemoryRetriever:
         query: str,
         category: str | None = None,
         limit: int = DEFAULT_RESULT_LIMIT,
-        similarity_threshold: float | None = None
+        similarity_threshold: float | None = None,
+        min_score: float | None = None
     ) -> list[RetrievedMemory]:
         """Retrieve approved memories by embedding cosine similarity."""
 
@@ -500,7 +600,8 @@ class MemoryRetriever:
                 cleaned_query=cleaned_query,
                 normalised_filter=normalised_filter,
                 limit=limit,
-                threshold=threshold
+                threshold=threshold,
+                min_score=min_score
             )
 
         return await self._retrieve_semantic_python(
@@ -509,7 +610,8 @@ class MemoryRetriever:
             cleaned_query=cleaned_query,
             normalised_filter=normalised_filter,
             limit=limit,
-            threshold=threshold
+            threshold=threshold,
+            min_score=min_score
         )
 
     async def retrieve(
@@ -521,14 +623,15 @@ class MemoryRetriever:
         limit: int = DEFAULT_RESULT_LIMIT,
         mode: RetrievalMode | str = RetrievalMode.KEYWORD,
         similarity_threshold: float | None = None,
-        allow_keyword_fallback: bool = False
+        allow_keyword_fallback: bool = False,
+        min_score: float | None = None
     ) -> list[RetrievedMemory]:
-        """Dispatch to keyword or semantic retrieval.
+        """Dispatch to keyword, semantic, or hybrid retrieval.
 
         Keyword retrieval remains the default so existing callers and the
         existing retrieval API keep their current behaviour. Chat can request
         semantic mode with keyword fallback when pgvector or the embedding
-        model is unavailable.
+        model is unavailable. Hybrid mode combines both candidate lists.
         """
 
         mode_value = (
@@ -543,7 +646,20 @@ class MemoryRetriever:
                 user_id=user_id,
                 query=query,
                 category=category,
-                limit=limit
+                limit=limit,
+                min_score=min_score
+            )
+
+        if mode_value == RetrievalMode.HYBRID.value:
+            return await self.retrieve_hybrid(
+                session=session,
+                user_id=user_id,
+                query=query,
+                category=category,
+                limit=limit,
+                similarity_threshold=similarity_threshold,
+                min_score=min_score,
+                allow_keyword_fallback=allow_keyword_fallback
             )
 
         if mode_value != RetrievalMode.SEMANTIC.value:
@@ -558,7 +674,8 @@ class MemoryRetriever:
                 query=query,
                 category=category,
                 limit=limit,
-                similarity_threshold=similarity_threshold
+                similarity_threshold=similarity_threshold,
+                min_score=min_score
             )
 
         except MemoryValidationError:
@@ -578,7 +695,8 @@ class MemoryRetriever:
                 user_id=user_id,
                 query=query,
                 category=category,
-                limit=limit
+                limit=limit,
+                min_score=min_score
             )
 
     async def retrieve_hybrid(
@@ -589,7 +707,9 @@ class MemoryRetriever:
         category: str | None = None,
         limit: int = DEFAULT_RESULT_LIMIT,
         similarity_threshold: float | None = None,
-        candidate_limit: int | None = None
+        candidate_limit: int | None = None,
+        min_score: float | None = None,
+        allow_keyword_fallback: bool = True
     ) -> list[RetrievedMemory]:
         """Blend semantic and keyword retrieval results.
 
@@ -616,7 +736,8 @@ class MemoryRetriever:
                 user_id=user_id,
                 query=query,
                 category=category,
-                limit=limit
+                limit=limit,
+                min_score=min_score
             )
 
         configured_candidates = candidate_limit
@@ -652,6 +773,9 @@ class MemoryRetriever:
             SemanticRetrievalUnavailable,
             EmbeddingServiceError,
         ):
+            if not allow_keyword_fallback:
+                raise
+
             logger.info(
                 "Semantic memory retrieval unavailable; using keyword "
                 "retrieval."
@@ -662,7 +786,8 @@ class MemoryRetriever:
                 user_id=user_id,
                 query=query,
                 category=category,
-                limit=limit
+                limit=limit,
+                min_score=min_score
             )
 
         try:
@@ -690,7 +815,8 @@ class MemoryRetriever:
         return _blend_retrieval_results(
             semantic=semantic,
             keyword=keyword,
-            limit=limit
+            limit=limit,
+            min_score=min_score
         )
 
     async def _retrieve_semantic_pgvector(
@@ -700,7 +826,8 @@ class MemoryRetriever:
         cleaned_query: str,
         normalised_filter: str | None,
         limit: int,
-        threshold: float
+        threshold: float,
+        min_score: float | None = None
     ) -> list[RetrievedMemory]:
 
         if not await is_semantic_storage_available(session):
@@ -736,12 +863,35 @@ class MemoryRetriever:
 
         distance = Memory.embedding.cosine_distance(query_vector)
 
+        lowered_content = func.lower(Memory.content)
+
         statement = select(Memory, distance.label("distance")).where(
             Memory.user_id == user_id,
             Memory.status == MemoryStatus.APPROVED,
             Memory.embedding.is_not(None),
             distance <= (1.0 - threshold)
         )
+
+        # Reject obvious credential-bearing rows in SQL so they cannot consume
+        # the candidate slots. The regex check below still runs before the
+        # final limit for defence in depth.
+        for marker in (
+            "%password%",
+            "%passwd%",
+            "%api key%",
+            "%api_key%",
+            "%api-key%",
+            "%secret%",
+            "%token%",
+            "%private key%",
+            "%bearer%",
+            "%sk-%",
+            "%gsk-%",
+            "%akia%",
+        ):
+            statement = statement.where(
+                lowered_content.notlike(marker)
+            )
 
         if normalised_filter is not None:
             statement = statement.where(
@@ -750,10 +900,13 @@ class MemoryRetriever:
                 )
             )
 
+        # Overfetch up to the hard result cap, then filter, deduplicate, and
+        # truncate in Python. This keeps secret-bearing rows from displacing
+        # safe results while bounding database work on laptop-sized installs.
         statement = statement.order_by(
             distance.asc(),
             Memory.id.asc()
-        ).limit(limit)
+        ).limit(MAX_RESULT_LIMIT)
 
         try:
             rows = (await session.execute(statement)).all()
@@ -763,7 +916,7 @@ class MemoryRetriever:
                 "Semantic memory storage is not available."
             ) from error
 
-        results: list[RetrievedMemory] = []
+        candidates: list[RetrievedMemory] = []
 
         for memory, distance_value in rows:
             if _contains_secret(memory.content):
@@ -771,15 +924,23 @@ class MemoryRetriever:
 
             similarity = max(0.0, min(1.0, 1.0 - float(distance_value)))
 
-            results.append(
+            if similarity < threshold:
+                continue
+
+            candidates.append(
                 RetrievedMemory(
                     content=memory.content,
                     category=memory.category,
-                    relevance_score=round(similarity, 4)
+                    relevance_score=round(similarity, 4),
+                    id=memory.id
                 )
             )
 
-        return results
+        return _filter_retrieval_results(
+            candidates,
+            min_score=min_score,
+            limit=limit
+        )
 
     async def _retrieve_semantic_python(
         self,
@@ -788,7 +949,8 @@ class MemoryRetriever:
         cleaned_query: str,
         normalised_filter: str | None,
         limit: int,
-        threshold: float
+        threshold: float,
+        min_score: float | None = None
     ) -> list[RetrievedMemory]:
         """Portable cosine path used by test databases without pgvector."""
 
@@ -847,14 +1009,21 @@ class MemoryRetriever:
 
         scored.sort(key=lambda item: (-item[0], item[1]))
 
-        return [
+        candidates = [
             RetrievedMemory(
                 content=memory.content,
                 category=memory.category,
-                relevance_score=score
+                relevance_score=score,
+                id=memory_id
             )
-            for score, _memory_id, memory in scored[:limit]
+            for score, memory_id, memory in scored
         ]
+
+        return _filter_retrieval_results(
+            candidates,
+            min_score=min_score,
+            limit=limit
+        )
 
 
 # Create a reusable retriever instance

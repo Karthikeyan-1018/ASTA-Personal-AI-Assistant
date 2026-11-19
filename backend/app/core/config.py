@@ -1132,10 +1132,18 @@ class Settings:
     # Phase 18 Stage 1 local text-to-speech
     # ------------------------------------------------------------------
     # Disabling TTS hides the action in the UI and fails the synthesis route
-    # closed. The single verified local voice and its cache directory are
-    # backend implementation details, not user-facing settings.
+    # closed. Voice choices are restricted to complete local model and config
+    # pairs; user-specific selection is stored as a preference.
     TTS_ENABLED: bool = (
         os.getenv("TTS_ENABLED", "true").lower() == "true"
+    )
+
+    TTS_DEFAULT_VOICE: str = os.getenv(
+        "TTS_DEFAULT_VOICE", "en_US-john-medium"
+    ).strip()
+    TTS_DEFAULT_SPEED: float = float(os.getenv("TTS_DEFAULT_SPEED", "1.0"))
+    TTS_SENTENCE_PAUSE_SECONDS: float = float(
+        os.getenv("TTS_SENTENCE_PAUSE_SECONDS", "0.18")
     )
 
     # ------------------------------------------------------------------
@@ -1239,9 +1247,9 @@ class Settings:
     # ------------------------------------------------------------------
     # Phase 18 Stage 4 local voice conversation manager
     # ------------------------------------------------------------------
-    # Stage 4 only coordinates Stages 1-3 and the existing chat service. It is
-    # half-duplex by design: microphone capture is released before Piper
-    # playback and reacquired only for an explicit follow-up window.
+    # Stage 4 coordinates Stages 1-3 and the existing chat service. The browser
+    # keeps its echo-cancelled microphone open across playback for VAD barge-in;
+    # backend chat turns remain serialized per authenticated voice session.
     VOICE_CONVERSATION_ENABLED: bool = (
         os.getenv("VOICE_CONVERSATION_ENABLED", "true").lower() == "true"
     )
@@ -1270,6 +1278,14 @@ class Settings:
     # memory bounded on this CPU-only 16 GB workstation.
     VOICE_MAX_TTS_AUDIO_BYTES: int = int(
         os.getenv("VOICE_MAX_TTS_AUDIO_BYTES", str(16 * 1024 * 1024))
+    )
+    # Require sustained, confident speech before interrupting playback. The
+    # browser requests echo cancellation and noise suppression separately.
+    VOICE_BARGE_IN_MIN_SPEECH_SECONDS: float = float(
+        os.getenv("VOICE_BARGE_IN_MIN_SPEECH_SECONDS", "0.25")
+    )
+    VOICE_BARGE_IN_SPEECH_THRESHOLD: float = float(
+        os.getenv("VOICE_BARGE_IN_SPEECH_THRESHOLD", "0.65")
     )
 
     # ------------------------------------------------------------------

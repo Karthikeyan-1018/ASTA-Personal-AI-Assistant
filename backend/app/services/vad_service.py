@@ -487,7 +487,10 @@ class VADService:
                     session.state = STATE_LISTENING
 
                 if session.triggered:
-                    session.pcm.extend(frame.tobytes())
+                    int16_frame = np.clip(
+                        frame * 32767.0, -32768, 32767
+                    ).astype("<i2")
+                    session.pcm.extend(int16_frame.tobytes())
                     session.utterance_samples += frame_samples
 
                 if (
@@ -508,6 +511,9 @@ class VADService:
             "state": session.state,
             "speech_probability": probability if samples.size else 0.0,
             "speech_detected": session.triggered or session.state == STATE_SPEAKING,
+            "speech_duration_seconds": (
+                session.speech_samples / sample_rate if session.triggered else 0.0
+            ),
             "events": events,
             "completed_segments": completed,
             "sample_position": session.sample_position,

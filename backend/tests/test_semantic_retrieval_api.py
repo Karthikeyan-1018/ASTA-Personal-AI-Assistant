@@ -400,7 +400,7 @@ class SemanticRetrievalAPITests(unittest.IsolatedAsyncioTestCase):
 
         response = await self._retrieve({
             "query": "query",
-            "mode": "hybrid"
+            "mode": "vector"
         })
 
         self.assertEqual(response.status_code, 422)

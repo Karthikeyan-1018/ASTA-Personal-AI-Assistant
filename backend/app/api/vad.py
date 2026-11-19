@@ -150,6 +150,7 @@ async def process_vad_frames(
         state=result["state"],
         speech_probability=result["speech_probability"],
         speech_detected=result["speech_detected"],
+        speech_duration_seconds=result.get("speech_duration_seconds", 0.0),
         events=result["events"],
         completed_segments=[
             VADSegmentSummary(**segment)
