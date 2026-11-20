@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import systemApi from '../services/api/system.api';
-import type { ToolMetricsResponse, ToolResultResponse } from '../types/api.types';
+import type { ToolMetricsResponse } from '../types/api.types';
 import type {
   HistoryPoint,
   SystemMonitorStatus,
@@ -8,16 +8,18 @@ import type {
 } from '../types/system.types';
 import {
   appendHistory,
-  mapProcessSummary,
+  mapMonitorSnapshot,
   mapProviderHealth,
-  mapSystemSummary,
   mapToolRuntime,
   snapshotHasRealData,
 } from '../utils/systemMetrics';
-import type { ProviderHealthResponse } from '../services/api/system.api';
+import type {
+  ProviderHealthResponse,
+  SystemMonitorWire,
+} from '../services/api/system.api';
 
-/** Confirmed product decision: poll real backend data every 20 seconds. */
-export const SYSTEM_MONITOR_REFRESH_MS = 20_000;
+/** Default cadence; the authenticated backend snapshot can configure 1-10 seconds. */
+export const SYSTEM_MONITOR_REFRESH_MS = 2_000;
 
 export type RefreshReason = 'initial' | 'auto' | 'manual' | 'focus' | 'retry';
 
@@ -36,6 +38,7 @@ interface SystemStoreState {
   error: string | null;
   lastSuccessfulAt: string | null;
   lastRefreshReason: RefreshReason | null;
+  refreshIntervalMs: number;
   refresh: (options?: RefreshOptions) => Promise<boolean>;
   retry: () => Promise<boolean>;
   refreshIfStale: () => Promise<boolean>;
@@ -45,6 +48,8 @@ interface SystemStoreState {
 
 let inFlight = false;
 let requestSequence = 0;
+let lastAncillaryRefreshAt = 0;
+const ANCILLARY_REFRESH_MS = 20_000;
 /** Incremented on unmount so an in-flight response cannot update dead UI. */
 let sessionGeneration = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -76,6 +81,7 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
   error: null,
   lastSuccessfulAt: null,
   lastRefreshReason: null,
+  refreshIntervalMs: SYSTEM_MONITOR_REFRESH_MS,
 
   refresh: async (options = {}) => {
     // One shared guard prevents overlapping manual, focus and interval writes.
@@ -86,6 +92,8 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
     const generation = sessionGeneration;
     const hadSnapshot = get().snapshot !== null;
     const reason = options.reason || 'manual';
+    const refreshAncillary =
+      reason !== 'auto' || Date.now() - lastAncillaryRefreshAt >= ANCILLARY_REFRESH_MS;
 
     set({
       isLoading: !hadSnapshot,
@@ -97,12 +105,11 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
     });
 
     try {
-      const [providerResult, runtimeResult, summaryResult, processResult] =
+      const [providerResult, runtimeResult, snapshotResult] =
         await Promise.allSettled([
-          systemApi.getProviderHealth(),
-          systemApi.getToolMetrics(),
-          systemApi.getSystemSummary(),
-          systemApi.getProcessSummary(),
+          refreshAncillary ? systemApi.getProviderHealth() : Promise.resolve(null),
+          refreshAncillary ? systemApi.getToolMetrics() : Promise.resolve(null),
+          systemApi.getSnapshot(),
         ]);
 
       // Discard a superseded response; only the latest request may write state.
@@ -111,35 +118,44 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
       }
 
       const errors: string[] = [];
-      const providerWire = settledValue<ProviderHealthResponse>(
-        providerResult,
-        'Provider health',
-        errors
-      );
-      const runtimeWire = settledValue<ToolMetricsResponse>(
-        runtimeResult,
-        'Tool metrics',
-        errors
-      );
-      const summaryWire = settledValue<ToolResultResponse>(
-        summaryResult,
-        'System information tool',
-        errors
-      );
-      const processWire = settledValue<ToolResultResponse>(
-        processResult,
-        'Process inspection tool',
+      const providerWire = refreshAncillary
+        ? settledValue<ProviderHealthResponse>(providerResult as PromiseSettledResult<ProviderHealthResponse>, 'Provider health', errors)
+        : null;
+      const runtimeWire = refreshAncillary
+        ? settledValue<ToolMetricsResponse>(runtimeResult as PromiseSettledResult<ToolMetricsResponse>, 'Tool metrics', errors)
+        : null;
+      const snapshotWire = settledValue<SystemMonitorWire>(
+        snapshotResult,
+        'System monitor',
         errors
       );
 
-      const summary = mapSystemSummary(summaryWire);
+      const summary = snapshotWire
+        ? mapMonitorSnapshot(snapshotWire)
+        : mapMonitorSnapshot({
+            collected_at: new Date().toISOString(),
+            refresh_interval_seconds: SYSTEM_MONITOR_REFRESH_MS / 1000,
+            cpu: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            memory: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            disk: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            network: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            gpu: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            system: { available: false, reason: 'System Monitor endpoint unavailable.' },
+            processes: { available: false, reason: 'System Monitor endpoint unavailable.' },
+          });
       const snapshot: SystemSnapshot = {
-        collectedAt: new Date().toISOString(),
         ...summary,
-        processes: mapProcessSummary(processWire),
-        providers: mapProviderHealth(providerWire),
-        toolRuntime: mapToolRuntime(runtimeWire),
+        providers: refreshAncillary
+          ? mapProviderHealth(providerWire)
+          : get().snapshot?.providers ?? null,
+        toolRuntime: refreshAncillary
+          ? mapToolRuntime(runtimeWire)
+          : get().snapshot?.toolRuntime ?? null,
       };
+      if (refreshAncillary) lastAncillaryRefreshAt = Date.now();
+      const newInterval = snapshotWire
+        ? Math.max(1_000, Math.min(10_000, snapshotWire.refresh_interval_seconds * 1000))
+        : get().refreshIntervalMs;
       const hasData = snapshotHasRealData(snapshot);
 
       // Every source failed: this is a failed refresh, not an empty success.
@@ -151,6 +167,7 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
           isBackendConnected: false,
           error: errors.join('; '),
           status: state.snapshot ? 'stale' : 'unavailable',
+          refreshIntervalMs: newInterval,
         }));
         return false;
       }
@@ -166,6 +183,7 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
           error: null,
           lastSuccessfulAt: state.lastSuccessfulAt,
           status: 'unavailable',
+          refreshIntervalMs: newInterval,
         }));
         return false;
       }
@@ -179,7 +197,14 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
         error: errors.length > 0 ? errors.join('; ') : null,
         lastSuccessfulAt: snapshot.collectedAt,
         status: 'connected',
+        refreshIntervalMs: newInterval,
       }));
+      if (newInterval !== get().refreshIntervalMs && pollTimer !== null) {
+        globalThis.clearInterval(pollTimer);
+        pollTimer = globalThis.setInterval(() => {
+          void get().refresh({ reason: 'auto' });
+        }, newInterval);
+      }
 
       return true;
     } catch (err: unknown) {
@@ -219,7 +244,7 @@ export const useSystemStore = create<SystemStoreState>((set, get) => ({
     set({ isPolling: true });
     pollTimer = globalThis.setInterval(() => {
       void get().refresh({ reason: 'auto' });
-    }, SYSTEM_MONITOR_REFRESH_MS);
+    }, get().refreshIntervalMs);
   },
 
   stopPolling: () => {

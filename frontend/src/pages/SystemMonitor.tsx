@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -45,14 +45,6 @@ const STATUS_TONES: Record<SystemMonitorStatus, string> = {
   unavailable: 'border-rose-500/30 bg-rose-500/10 text-rose-300',
 };
 
-const UNSUPPORTED_METRICS = [
-  { label: 'Host CPU utilization', reason: 'No backend endpoint reports a system-wide CPU percentage.' },
-  { label: 'Network throughput', reason: 'No backend endpoint reports network counters.' },
-  { label: 'System uptime', reason: 'No backend endpoint reports host boot time.' },
-  { label: 'Temperature', reason: 'No backend endpoint reports thermal sensors.' },
-  { label: 'GPU utilization / memory', reason: 'No backend endpoint reports GPU measurements.' },
-];
-
 function formatPercent(value: number | null): string {
   return value === null ? 'Unavailable' : `${value}%`;
 }
@@ -63,6 +55,18 @@ function formatGib(value: number | null): string {
 
 function formatMib(value: number | null): string {
   return value === null ? 'Unavailable' : `${value.toFixed(0)} MiB`;
+}
+
+function formatRate(bytesPerSecond: number | null, supported = true): string {
+  if (!supported) return 'Not supported';
+  if (bytesPerSecond === null) return 'Sampling…';
+  if (bytesPerSecond >= 1024 * 1024) {
+    return `${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MiB/s`;
+  }
+  if (bytesPerSecond >= 1024) {
+    return `${(bytesPerSecond / 1024).toFixed(1)} KiB/s`;
+  }
+  return `${bytesPerSecond.toFixed(0)} B/s`;
 }
 
 function formatCount(value: number | null): string {
@@ -139,18 +143,21 @@ function HostMetricCards({ snapshot }: { snapshot: SystemSnapshot }) {
             <p className="text-sm font-semibold text-slate-100">
               {snapshot.cpu.model || 'Processor model unavailable'}
             </p>
+            <p className="text-2xl font-bold text-white">
+              {snapshot.cpu.usagePercent === null ? 'Sampling…' : formatPercent(snapshot.cpu.usagePercent)}
+            </p>
             <p className="text-[11px] text-slate-400">
               {formatCount(snapshot.cpu.logicalProcessors)} logical processors ·{' '}
               {formatCount(snapshot.cpu.physicalCores)} physical cores
             </p>
-            <p className="text-[11px] text-amber-300/80">
-              Utilization unavailable — the backend does not report host CPU load.
+            <p className="text-[11px] text-slate-500">
+              {snapshot.cpu.frequencyMhz === null ? 'Frequency unavailable' : `${snapshot.cpu.frequencyMhz.toFixed(0)} MHz`} · {snapshot.cpu.architecture || 'Architecture unavailable'}
             </p>
+            <ResourceBar value={snapshot.cpu.usagePercent} />
           </div>
         ) : (
           <Unavailable reason={snapshot.cpu.reason} />
         )}
-        <ResourceBar value={null} />
       </Card>
 
       <Card title="Memory" icon={<MemoryStick className="h-4 w-4 text-indigo-400" />}>
@@ -198,6 +205,9 @@ function HostMetricCards({ snapshot }: { snapshot: SystemSnapshot }) {
                 )}
               </div>
             ))}
+            <p className="border-t border-slate-800 pt-2 text-[11px] text-slate-500">
+              System-wide I/O · Read {formatRate(snapshot.disk.readBytesPerSecond, snapshot.disk.ioAvailable !== false)} · Write {formatRate(snapshot.disk.writeBytesPerSecond, snapshot.disk.ioAvailable !== false)}
+            </p>
           </div>
         ) : (
           <Unavailable reason={snapshot.disk.reason} />
@@ -221,6 +231,43 @@ function HostMetricCards({ snapshot }: { snapshot: SystemSnapshot }) {
         ) : (
           <Unavailable reason={snapshot.processes.reason} />
         )}
+      </Card>
+    </div>
+  );
+}
+
+function LiveMetricCards({ snapshot }: { snapshot: SystemSnapshot }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <Card title="Network" icon={<Activity className="h-4 w-4 text-sky-400" />}>
+        {snapshot.network.available ? (
+          <div className="space-y-2 text-[11px] text-slate-400">
+            <p>Download: <span className="text-lg font-bold text-white">{formatRate(snapshot.network.downloadBytesPerSecond)}</span></p>
+            <p>Upload: <span className="text-lg font-bold text-white">{formatRate(snapshot.network.uploadBytesPerSecond)}</span></p>
+            <p>Total received {snapshot.network.bytesReceived === null ? 'Unavailable' : formatGib(snapshot.network.bytesReceived / (1024 ** 3))} · sent {snapshot.network.bytesSent === null ? 'Unavailable' : formatGib(snapshot.network.bytesSent / (1024 ** 3))}</p>
+            {snapshot.network.interfaces.map((item) => <p key={item.name} className="truncate">{item.name}: {item.isUp === null ? 'state unavailable' : item.isUp ? 'connected' : 'down'}</p>)}
+          </div>
+        ) : <Unavailable reason={snapshot.network.reason} />}
+      </Card>
+      <Card title="GPU" icon={<Cpu className="h-4 w-4 text-violet-400" />}>
+        {snapshot.gpu.available ? (
+          <div className="space-y-2 text-[11px] text-slate-400">
+            <p className="text-sm font-semibold text-slate-100">{snapshot.gpu.model || 'GPU model unavailable'}</p>
+            <p>Utilization: <span className="text-white">{formatPercent(snapshot.gpu.usagePercent)}</span></p>
+            <p>VRAM used: <span className="text-white">{formatMib(snapshot.gpu.memoryUsedMib)} / {formatMib(snapshot.gpu.memoryTotalMib)}</span></p>
+            <p>Temperature: <span className="text-white">{snapshot.gpu.temperatureCelsius === null ? 'Not supported' : `${snapshot.gpu.temperatureCelsius} °C`}</span></p>
+            <p>Power: <span className="text-white">{snapshot.gpu.powerWatts === null ? 'Not supported' : `${snapshot.gpu.powerWatts} W`}</span></p>
+          </div>
+        ) : <Unavailable reason={snapshot.gpu.reason} />}
+      </Card>
+      <Card title="System information" icon={<Server className="h-4 w-4 text-indigo-400" />}>
+        <div className="space-y-2 text-[11px] text-slate-400">
+          <p>OS: <span className="text-slate-100">{snapshot.hostInfo.os || 'Unavailable'}</span></p>
+          <p>Host: <span className="text-slate-100">{snapshot.hostInfo.hostname || 'Unavailable'}</span></p>
+          <p>Architecture: <span className="text-slate-100">{snapshot.hostInfo.architecture || 'Unavailable'}</span></p>
+          <p>Boot time: <span className="text-slate-100">{formatDateTime(snapshot.hostInfo.bootTime)}</span></p>
+          <p>Uptime: <span className="text-slate-100">{snapshot.hostInfo.uptimeSeconds === null ? 'Unavailable' : `${Math.floor(snapshot.hostInfo.uptimeSeconds / 86400)}d ${Math.floor(snapshot.hostInfo.uptimeSeconds % 86400 / 3600)}h ${Math.floor(snapshot.hostInfo.uptimeSeconds % 3600 / 60)}m`}</span></p>
+        </div>
       </Card>
     </div>
   );
@@ -288,8 +335,12 @@ function SessionHistory({ points }: { points: HistoryPoint[] }) {
 
   const data = points.map((point) => ({
     time: formatClock(point.collectedAt),
+    cpu: point.cpuPercent,
     memory: point.memoryPercent,
     disk: point.diskPercent,
+    gpu: point.gpuPercent,
+    upload: point.uploadBytesPerSecond === null ? null : point.uploadBytesPerSecond / 1048576,
+    download: point.downloadBytesPerSecond === null ? null : point.downloadBytesPerSecond / 1048576,
   }));
 
   return (
@@ -319,10 +370,26 @@ function SessionHistory({ points }: { points: HistoryPoint[] }) {
           />
           <Area
             type="monotone"
+            dataKey="cpu"
+            name="CPU %"
+            stroke="#22d3ee"
+            fill="none"
+            connectNulls={false}
+          />
+          <Area
+            type="monotone"
             dataKey="memory"
             name="Memory %"
             stroke="#818cf8"
             fill="url(#monitorMemoryGradient)"
+            connectNulls={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="gpu"
+            name="GPU %"
+            stroke="#c084fc"
+            fill="none"
             connectNulls={false}
           />
           <Area
@@ -335,6 +402,19 @@ function SessionHistory({ points }: { points: HistoryPoint[] }) {
           />
         </AreaChart>
       </ResponsiveContainer>
+      <div className="mt-6 h-40 w-full">
+        <p className="mb-1 text-[10px] text-slate-500">Network transfer rate (MiB/s)</p>
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={data} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+            <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
+            <XAxis dataKey="time" stroke="#64748b" fontSize={10} />
+            <YAxis stroke="#64748b" fontSize={10} />
+            <Tooltip contentStyle={{ backgroundColor: '#020617', borderColor: '#334155', borderRadius: '0.75rem', fontSize: '11px' }} />
+            <Area type="monotone" dataKey="download" name="Download MiB/s" stroke="#38bdf8" fill="none" connectNulls={false} />
+            <Area type="monotone" dataKey="upload" name="Upload MiB/s" stroke="#f472b6" fill="none" connectNulls={false} />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 }
@@ -346,6 +426,7 @@ export const SystemMonitor: React.FC = () => {
   const isLoading = useSystemStore((s) => s.isLoading);
   const isRefreshing = useSystemStore((s) => s.isRefreshing);
   const isPolling = useSystemStore((s) => s.isPolling);
+  const refreshIntervalMs = useSystemStore((s) => s.refreshIntervalMs);
   const error = useSystemStore((s) => s.error);
   const lastSuccessfulAt = useSystemStore((s) => s.lastSuccessfulAt);
   const refresh = useSystemStore((s) => s.refresh);
@@ -353,24 +434,37 @@ export const SystemMonitor: React.FC = () => {
   const refreshIfStale = useSystemStore((s) => s.refreshIfStale);
   const startPolling = useSystemStore((s) => s.startPolling);
   const stopPolling = useSystemStore((s) => s.stopPolling);
+  const [processFilter, setProcessFilter] = useState('');
+  const [processSort, setProcessSort] = useState<'cpu' | 'memory'>('cpu');
+  const visibleProcesses = useMemo(() => {
+    const query = processFilter.trim().toLocaleLowerCase();
+    return [...(snapshot?.processes.processes ?? [])]
+      .filter((process) => !query || process.name.toLocaleLowerCase().includes(query) || String(process.pid).includes(query))
+      .sort((left, right) => processSort === 'cpu'
+        ? (right.cpuPercent ?? -1) - (left.cpuPercent ?? -1)
+        : (right.memoryMib ?? -1) - (left.memoryMib ?? -1));
+  }, [snapshot?.processes.processes, processFilter, processSort]);
 
   useEffect(() => {
     void refresh({ reason: 'initial' });
     startPolling();
 
-    const handleFocus = () => {
+    const handleVisibility = () => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        startPolling();
         void refreshIfStale();
+      } else {
+        stopPolling();
       }
     };
 
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', handleFocus);
+    window.addEventListener('focus', handleVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       stopPolling();
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleFocus);
+      window.removeEventListener('focus', handleVisibility);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [refresh, refreshIfStale, startPolling, stopPolling]);
 
@@ -409,7 +503,7 @@ export const SystemMonitor: React.FC = () => {
       </div>
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
-        <span>Auto-refresh: every 20s</span>
+        <span>Auto-refresh: every {Math.round(refreshIntervalMs / 1000)}s</span>
         <span>{isPolling ? 'Polling active' : 'Polling stopped'}</span>
         <span>Last successful update: {formatDateTime(lastSuccessfulAt)}</span>
         {status === 'stale' && (
@@ -463,11 +557,30 @@ export const SystemMonitor: React.FC = () => {
       {snapshot && (
         <>
           <HostMetricCards snapshot={snapshot} />
+          <LiveMetricCards snapshot={snapshot} />
 
           <div className="rounded-2xl border border-slate-800/80 bg-slate-900/40 p-5 shadow-lg">
             <h2 className="text-sm font-bold uppercase tracking-wider text-white">
-              Top processes (read-only)
+              Processes (read-only)
             </h2>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <input
+                value={processFilter}
+                onChange={(event) => setProcessFilter(event.target.value)}
+                placeholder="Filter process name or PID"
+                aria-label="Filter processes"
+                className="min-w-48 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
+              />
+              <select
+                value={processSort}
+                onChange={(event) => setProcessSort(event.target.value as 'cpu' | 'memory')}
+                aria-label="Sort processes"
+                className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
+              >
+                <option value="cpu">Sort by CPU</option>
+                <option value="memory">Sort by RAM</option>
+              </select>
+            </div>
             {snapshot.processes.available && snapshot.processes.processes.length > 0 ? (
               <div className="mt-3 overflow-x-auto">
                 <table className="w-full text-left text-[11px]">
@@ -477,11 +590,12 @@ export const SystemMonitor: React.FC = () => {
                       <th className="py-2 pr-3">Name</th>
                       <th className="py-2 pr-3">CPU</th>
                       <th className="py-2 pr-3">Memory</th>
+                      <th className="py-2 pr-3">Status</th>
                       <th className="py-2">Threads</th>
                     </tr>
                   </thead>
                   <tbody className="text-slate-300">
-                    {snapshot.processes.processes.map((process) => (
+                    {visibleProcesses.map((process) => (
                       <tr key={process.pid} className="border-t border-slate-800">
                         <td className="py-2 pr-3 font-mono">{process.pid}</td>
                         <td className="py-2 pr-3">{process.name}</td>
@@ -491,6 +605,7 @@ export const SystemMonitor: React.FC = () => {
                         <td className="py-2 pr-3">
                           {process.memoryAvailable ? formatMib(process.memoryMib) : 'Unavailable'}
                         </td>
+                        <td className="py-2 pr-3">{process.status || 'Unknown'}</td>
                         <td className="py-2">{formatCount(process.threadCount)}</td>
                       </tr>
                     ))}
@@ -508,20 +623,6 @@ export const SystemMonitor: React.FC = () => {
           </div>
 
           <BackendHealthCards snapshot={snapshot} />
-
-          <div className="rounded-2xl border border-slate-800/80 bg-slate-900/40 p-5 shadow-lg">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-white">
-              Unsupported measurements
-            </h2>
-            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {UNSUPPORTED_METRICS.map((item) => (
-                <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-                  <p className="text-[11px] font-semibold text-slate-300">{item.label}: Unavailable</p>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">{item.reason}</p>
-                </div>
-              ))}
-            </div>
-          </div>
 
           <div className="rounded-2xl border border-slate-800/80 bg-slate-900/40 p-5 shadow-lg">
             <div className="flex items-center justify-between">

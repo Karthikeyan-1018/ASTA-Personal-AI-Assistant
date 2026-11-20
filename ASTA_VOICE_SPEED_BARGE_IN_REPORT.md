@@ -9,6 +9,7 @@
 - Kept the existing voice stack (Silero VAD, faster-whisper, ChatService/provider routing, Piper) and the selected `en_US-joe-medium` voice. No new router or speech service was introduced.
 - Reduced VAD upload batches from 16 to 8 frames (512 ms to 256 ms of buffered audio), lowering the maximum batch wait by up to 256 ms. Browser capture requests echo cancellation, noise suppression, and automatic gain control.
 - Kept mic/VAD capture active while ASTA processes or plays a response. Speech over configured confidence (`0.65` default) and duration (`0.25 s` default) during an active response triggers barge-in: playback is stopped locally, the old turn is invalidated/cancelled, and the session returns to listening.
+- Follow-up diagnosis of the UI's “local speech service is busy” error found that the manual recording lock was released before its STT upload completed. The frontend now holds the shared audio workflow lock through transcription, preventing a voice conversation from starting concurrently with an outstanding manual Whisper request.
 - Added interrupted state/event handling, generation guards against stale responses/audio, cancellation-safe handling of native model work, and per-stage server timing fields. Existing authentication, CSRF, session ownership, audio limits and local speech processing are retained.
 
 ## Measurements
@@ -48,9 +49,10 @@ Actual microphone/speaker tests (interrupt at start/middle/end; short/long utter
 - Focused voice, VAD, STT, Piper/TTS, interruption, and auth/CSRF tests: **58 passed**.
 - Frontend `npm run build`: passed (existing large-chunk and dynamic-import warnings).
 - Frontend `npm run lint`: passed with one existing React set-state-in-effect warning in `Chat.tsx`.
+- After the manual STT/voice overlap fix, frontend build and lint were rerun successfully (same existing lint warning).
 - Full backend suite: attempted, but **inconclusive**. It advanced through the broad chat/memory/task tests and emitted expected mocked-provider/validation logs, then remained without a test summary for several minutes. I stopped the run; it returned exit 1 on interruption, not on a reported assertion failure. No full-suite pass is claimed.
 - The previous reliability report records an older five-turn conversation test and a 1,994-test backend baseline. That is historical half-duplex evidence, not a validation of the new barge-in path.
 
 ## Verdict
 
-**PARTIAL PASS.** Local performance profiling is complete for STT and VAD; the justified VAD batching change is implemented, and the focused interruption/security tests and frontend checks pass. Joe Medium remains preferred. The implementation is structured for barge-in and cancels stale output, but live microphone/speaker behavior, actual interruption accuracy/false-trigger rates, complete-turn before/after latency, provider TTFT/fallback timing, target-hardware CPU/RAM/GPU use, and final full-backend regression status remain unverified. Do not interpret this report as proof that ASTA will always stop speaking immediately in a real acoustic environment.
+**PARTIAL PASS.** Local performance profiling is complete for STT and VAD; the VAD batching and manual-STT/voice overlap fixes are implemented, and the focused interruption/security tests and frontend checks pass. Joe Medium remains preferred. The STT semaphore still returns a busy response if an independent backend request holds the single inference slot beyond its configured queue timeout. Live microphone/speaker behavior, actual interruption accuracy/false-trigger rates, complete-turn before/after latency, provider TTFT/fallback timing, target-hardware CPU/RAM/GPU use, and final full-backend regression status remain unverified. Do not interpret this report as proof that ASTA will always stop speaking immediately in a real acoustic environment.

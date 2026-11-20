@@ -129,6 +129,11 @@ export const useSTTStore = create<STTStoreState>((set, get) => {
   async function uploadRecording(blob: Blob, mimeType: string, token: number) {
     if (get().isTranscribing) return;
 
+    // Keep the shared audio workflow lock until local Whisper finishes.
+    // Recording cleanup releases the microphone before this request starts,
+    // but allowing Stage 4 to start in that gap can contend for the one
+    // serialized STT inference slot and surface a misleading "busy" error.
+    setManualMicrophoneActive(true);
     set({ isTranscribing: true, error: null });
 
     try {
@@ -147,6 +152,7 @@ export const useSTTStore = create<STTStoreState>((set, get) => {
         set({ error: transcriptionError(error) });
       }
     } finally {
+      setManualMicrophoneActive(false);
       if (token === requestToken) {
         set({ isTranscribing: false });
       }

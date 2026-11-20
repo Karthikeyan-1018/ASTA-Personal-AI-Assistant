@@ -501,7 +501,7 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
         if (isManualMicrophoneActive()) {
           set({
             error:
-              'Stop the manual microphone recording before starting a voice conversation.',
+              'Wait for the manual microphone transcription to finish before starting a voice conversation.',
           });
           return false;
         }
@@ -535,7 +535,7 @@ export const useVoiceConversationStore = create<VoiceConversationStoreState>(
           }
           if (isManualMicrophoneActive()) {
             throw new Error(
-              'Stop the manual microphone recording before starting a voice conversation.',
+              'Wait for the manual microphone transcription to finish before starting a voice conversation.',
             );
           }
           if (

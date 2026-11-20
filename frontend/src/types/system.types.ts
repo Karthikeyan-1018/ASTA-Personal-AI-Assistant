@@ -19,6 +19,9 @@ export interface CpuInfo {
   logicalProcessors: number | null;
   physicalCores: number | null;
   architecture: string | null;
+  usagePercent: number | null;
+  perCorePercent: number[] | null;
+  frequencyMhz: number | null;
   reason: string | null;
 }
 
@@ -46,6 +49,42 @@ export interface DiskMetric {
   available: boolean;
   drives: DiskDriveMetric[];
   reason: string | null;
+  readBytesPerSecond: number | null;
+  writeBytesPerSecond: number | null;
+  ioAvailable: boolean | null;
+  ioReason: string | null;
+}
+
+export interface NetworkInterfaceMetric {
+  name: string;
+  isUp: boolean | null;
+  speedMbps: number | null;
+  bytesSent: number | null;
+  bytesReceived: number | null;
+  uploadBytesPerSecond: number | null;
+  downloadBytesPerSecond: number | null;
+}
+
+export interface NetworkMetric {
+  available: boolean;
+  uploadBytesPerSecond: number | null;
+  downloadBytesPerSecond: number | null;
+  bytesSent: number | null;
+  bytesReceived: number | null;
+  interfaces: NetworkInterfaceMetric[];
+  reason: string | null;
+}
+
+export interface GpuMetric {
+  available: boolean;
+  model: string | null;
+  usagePercent: number | null;
+  memoryTotalMib: number | null;
+  memoryUsedMib: number | null;
+  memoryAvailableMib: number | null;
+  temperatureCelsius: number | null;
+  powerWatts: number | null;
+  reason: string | null;
 }
 
 export interface ProcessEntry {
@@ -56,6 +95,7 @@ export interface ProcessEntry {
   cpuAvailable: boolean;
   memoryMib: number | null;
   memoryAvailable: boolean;
+  status: string | null;
 }
 
 export interface ProcessMetric {
@@ -91,6 +131,9 @@ export interface HostInfo {
   os: string | null;
   hostname: string | null;
   python: string | null;
+  architecture: string | null;
+  bootTime: string | null;
+  uptimeSeconds: number | null;
 }
 
 export interface SystemSnapshot {
@@ -99,6 +142,8 @@ export interface SystemSnapshot {
   cpu: CpuInfo;
   memory: MemoryMetric;
   disk: DiskMetric;
+  network: NetworkMetric;
+  gpu: GpuMetric;
   processes: ProcessMetric;
   providers: ProviderHealth | null;
   toolRuntime: ToolRuntimeMetrics | null;
@@ -110,4 +155,8 @@ export interface HistoryPoint {
   memoryPercent: number | null;
   diskPercent: number | null;
   processCount: number | null;
+  cpuPercent: number | null;
+  uploadBytesPerSecond: number | null;
+  downloadBytesPerSecond: number | null;
+  gpuPercent: number | null;
 }

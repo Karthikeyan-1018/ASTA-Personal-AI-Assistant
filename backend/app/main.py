@@ -28,6 +28,7 @@ from app.api.tts import router as tts_router
 from app.api.vad import router as vad_router
 from app.api.voice_conversation import router as voice_conversation_router
 from app.api.tools import router as tools_router
+from app.api.system_monitor import router as system_monitor_router
 from app.core.config import settings
 from app.database.connection import AsyncSessionLocal
 from app.scheduler.runner import BackgroundScheduler
@@ -257,6 +258,7 @@ app.include_router(recurrences_router)
 
 app.include_router(task_actions_router)
 app.include_router(tools_router)
+app.include_router(system_monitor_router)
 app.include_router(tts_router)
 app.include_router(stt_router)
 app.include_router(vad_router)

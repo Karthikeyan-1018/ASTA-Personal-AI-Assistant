@@ -1,5 +1,6 @@
 
 import os
+import math
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -8,6 +9,14 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 
 # Load environment variables from C:\Asta\.env
 load_dotenv(BASE_DIR / ".env")
+
+
+def _safe_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
 
 
 class Settings:
@@ -894,6 +903,12 @@ class Settings:
 
     TOOL_SYSTEM_INFO_MAX_DISKS: int = int(
         os.getenv("TOOL_SYSTEM_INFO_MAX_DISKS", "8")
+    )
+
+    # Read-only System Monitor refresh cadence. The frontend uses this value
+    # for its visible-page polling interval; clamp again at the API boundary.
+    SYSTEM_MONITOR_REFRESH_SECONDS: float = float(
+        _safe_float_env("SYSTEM_MONITOR_REFRESH_SECONDS", 2.0)
     )
 
     # Read-only process and active-window inspection (Phase 12D). Disabled by

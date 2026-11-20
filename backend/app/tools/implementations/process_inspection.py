@@ -997,6 +997,7 @@ def _collect_resource_summary(
                 "pid": entry.pid,
                 "name": _bounded_name(entry.name) or "",
                 "thread_count": entry.thread_count,
+                "status": measurement.status,
                 "cpu": _cpu_payload(measurement),
                 "memory": _memory_payload(measurement),
             }

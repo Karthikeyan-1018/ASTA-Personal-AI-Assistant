@@ -18,7 +18,7 @@ import type {
   SystemSnapshot,
   ToolRuntimeMetrics,
 } from '../types/system.types';
-import type { ProviderHealthResponse as ProviderHealthWire } from '../services/api/system.api';
+import type { ProviderHealthResponse as ProviderHealthWire, SystemMonitorWire } from '../services/api/system.api';
 import type { ToolMetricsResponse } from '../types/api.types';
 
 type UnknownRecord = Record<string, unknown>;
@@ -75,6 +75,9 @@ function mapCpu(data: unknown, unavailableReason: string | null): CpuInfo {
     logicalProcessors: integer(raw?.logical_processors),
     physicalCores: integer(raw?.physical_cores),
     architecture: text(raw?.architecture),
+    usagePercent: available ? percent(raw?.usage_percent) : null,
+    perCorePercent: null,
+    frequencyMhz: null,
     reason: available ? null : unavailableReason || 'CPU information is unavailable.',
   };
 }
@@ -131,6 +134,10 @@ function mapDisk(data: unknown, unavailableReason: string | null): DiskMetric {
     reason: available
       ? null
       : unavailableReason || 'Disk information is unavailable.',
+    readBytesPerSecond: null,
+    writeBytesPerSecond: null,
+    ioAvailable: null,
+    ioReason: null,
   };
 }
 
@@ -155,6 +162,7 @@ function mapProcess(value: unknown): ProcessEntry | null {
     cpuAvailable,
     memoryMib: memoryAvailable ? finiteNumber(memory?.mib) : null,
     memoryAvailable,
+    status: text(raw.status),
   };
 }
 
@@ -190,6 +198,9 @@ function mapHostInfo(sectionsValue: unknown): HostInfo {
     os: text(os?.platform) || text(os?.system) || null,
     hostname: text(hostname?.hostname),
     python: text(python?.version),
+    architecture: null,
+    bootTime: null,
+    uptimeSeconds: null,
   };
 }
 
@@ -202,7 +213,144 @@ export function mapSystemSummary(result: ToolResultResponse | null | undefined) 
     cpu: mapCpu(sections?.cpu, reason),
     memory: mapMemory(sections?.memory, reason),
     disk: mapDisk(sections?.disk, reason),
+    network: {
+      available: false,
+      uploadBytesPerSecond: null,
+      downloadBytesPerSecond: null,
+      bytesSent: null,
+      bytesReceived: null,
+      interfaces: [],
+      reason: 'Network telemetry is unavailable.',
+    },
+    gpu: {
+      available: false,
+      model: null,
+      usagePercent: null,
+      memoryTotalMib: null,
+      memoryUsedMib: null,
+      memoryAvailableMib: null,
+      temperatureCelsius: null,
+      powerWatts: null,
+      reason: 'GPU telemetry is unavailable.',
+    },
     hostInfo: mapHostInfo(sections),
+  };
+}
+
+function record(value: unknown): UnknownRecord | null {
+  return asRecord(value);
+}
+
+function sectionUnavailable(section: unknown, fallback: string): string | null {
+  const raw = asRecord(section);
+  return raw?.available === true ? null : text(raw?.reason) || fallback;
+}
+
+/** Maps the live backend snapshot while preserving unsupported values as null. */
+export function mapMonitorSnapshot(wire: SystemMonitorWire) {
+  const cpu = asRecord(wire.cpu);
+  const memory = asRecord(wire.memory);
+  const disk = asRecord(wire.disk);
+  const network = asRecord(wire.network);
+  const gpu = asRecord(wire.gpu);
+  const system = asRecord(wire.system);
+  const os = asRecord(system?.os);
+  const processesRaw = asRecord(wire.processes);
+  const drives = Array.isArray(disk?.drives)
+    ? disk.drives.map(mapDrive).filter((drive): drive is DiskDriveMetric => drive !== null)
+    : [];
+  const processes = Array.isArray(processesRaw?.processes)
+    ? processesRaw.processes.map(mapProcess).filter((item): item is ProcessEntry => item !== null)
+    : [];
+  const interfaces = Array.isArray(network?.interfaces)
+    ? network.interfaces.flatMap((item) => {
+        const raw = record(item);
+        const name = text(raw?.name);
+        return raw && name ? [{
+          name,
+          isUp: typeof raw.is_up === 'boolean' ? raw.is_up : null,
+          speedMbps: integer(raw.speed_mbps),
+          bytesSent: integer(raw.bytes_sent),
+          bytesReceived: integer(raw.bytes_received),
+          uploadBytesPerSecond: finiteNumber(raw.upload_bytes_per_second),
+          downloadBytesPerSecond: finiteNumber(raw.download_bytes_per_second),
+        }] : [];
+      })
+    : [];
+  const memoryBytes = (value: unknown) => {
+    const bytes = finiteNumber(value);
+    return bytes === null ? null : bytes / (1024 ** 3);
+  };
+
+  return {
+    collectedAt: text(wire.collected_at) || new Date().toISOString(),
+    cpu: {
+      available: cpu?.available === true,
+      model: text(cpu?.model),
+      logicalProcessors: integer(cpu?.logical_processors),
+      physicalCores: integer(cpu?.physical_cores),
+      architecture: text(cpu?.architecture),
+      usagePercent: percent(cpu?.usage_percent),
+      perCorePercent: Array.isArray(cpu?.per_core_percent)
+        ? cpu.per_core_percent.map(percent).filter((item): item is number => item !== null)
+        : null,
+      frequencyMhz: finiteNumber(cpu?.frequency_mhz),
+      reason: sectionUnavailable(wire.cpu, 'CPU information is unavailable.'),
+    },
+    memory: {
+      available: memory?.available === true,
+      usagePercent: percent(memory?.usage_percent),
+      usedGib: memoryBytes(memory?.used_bytes),
+      totalGib: memoryBytes(memory?.total_bytes),
+      availableGib: memoryBytes(memory?.available_bytes),
+      reason: sectionUnavailable(wire.memory, 'Memory information is unavailable.'),
+    },
+    disk: {
+      available: disk?.available === true && drives.some((item) => item.available),
+      drives,
+      readBytesPerSecond: finiteNumber(disk?.read_bytes_per_second),
+      writeBytesPerSecond: finiteNumber(disk?.write_bytes_per_second),
+      ioAvailable: typeof disk?.io_available === 'boolean' ? disk.io_available : null,
+      ioReason: text(disk?.io_reason),
+      reason: sectionUnavailable(wire.disk, 'Disk information is unavailable.'),
+    },
+    network: {
+      available: network?.available === true,
+      uploadBytesPerSecond: finiteNumber(network?.upload_bytes_per_second),
+      downloadBytesPerSecond: finiteNumber(network?.download_bytes_per_second),
+      bytesSent: integer(network?.bytes_sent),
+      bytesReceived: integer(network?.bytes_received),
+      interfaces,
+      reason: sectionUnavailable(wire.network, 'Network telemetry is unavailable.'),
+    },
+    gpu: {
+      available: gpu?.available === true,
+      model: text(gpu?.model),
+      usagePercent: percent(gpu?.usage_percent),
+      memoryTotalMib: finiteNumber(gpu?.memory_total_mib),
+      memoryUsedMib: finiteNumber(gpu?.memory_used_mib),
+      memoryAvailableMib: finiteNumber(gpu?.memory_available_mib),
+      temperatureCelsius: finiteNumber(gpu?.temperature_celsius),
+      powerWatts: finiteNumber(gpu?.power_watts),
+      reason: sectionUnavailable(wire.gpu, 'GPU telemetry is unavailable.'),
+    },
+    processes: {
+      available: processesRaw?.available === true,
+      count: integer(processesRaw?.count),
+      totalConsidered: integer(processesRaw?.total_considered),
+      truncated: typeof processesRaw?.truncated === 'boolean' ? processesRaw.truncated : null,
+      cpuSampleMs: integer(processesRaw?.cpu_sample_ms),
+      processes: processesRaw?.available === true ? processes : [],
+      reason: sectionUnavailable(wire.processes, 'Process information is unavailable.'),
+    },
+    hostInfo: {
+      os: text(os?.platform) || text(os?.system),
+      hostname: text(system?.hostname),
+      python: null,
+      architecture: text(system?.architecture),
+      bootTime: text(system?.boot_time),
+      uptimeSeconds: integer(system?.uptime_seconds),
+    },
   };
 }
 
@@ -250,6 +398,8 @@ export function snapshotHasRealData(snapshot: SystemSnapshot | null): boolean {
     snapshot.cpu.available ||
     snapshot.memory.available ||
     snapshot.disk.available ||
+    snapshot.network.available ||
+    snapshot.gpu.available ||
     snapshot.processes.available ||
     (snapshot.providers?.available ?? false) ||
     (snapshot.toolRuntime?.available ?? false)
@@ -275,8 +425,18 @@ export function appendHistory(
   const memoryPercent = snapshot.memory.available
     ? snapshot.memory.usagePercent
     : null;
+  const cpuPercent = snapshot.cpu.usagePercent;
+  const gpuPercent = snapshot.gpu.usagePercent;
 
-  if (memoryPercent === null && diskPercent === null && processCount === null) {
+  if (
+    memoryPercent === null &&
+    diskPercent === null &&
+    processCount === null &&
+    cpuPercent === null &&
+    snapshot.network.uploadBytesPerSecond === null &&
+    snapshot.network.downloadBytesPerSecond === null &&
+    gpuPercent === null
+  ) {
     return history;
   }
 
@@ -287,6 +447,10 @@ export function appendHistory(
       memoryPercent,
       diskPercent,
       processCount,
+      cpuPercent,
+      uploadBytesPerSecond: snapshot.network.uploadBytesPerSecond,
+      downloadBytesPerSecond: snapshot.network.downloadBytesPerSecond,
+      gpuPercent: snapshot.gpu.usagePercent,
     },
   ].slice(-40);
 }
