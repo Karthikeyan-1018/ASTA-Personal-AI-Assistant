@@ -4,6 +4,13 @@ ASTA is a context-aware personal AI assistant with a FastAPI backend,
 PostgreSQL storage, hybrid Groq/Ollama LLM routing, and pgvector-backed
 long-term memory.
 
+## Mobile app
+
+ASTA includes an Expo companion app for capturing and viewing tasks on a phone.
+It saves new tasks locally while the laptop is offline, then syncs when the
+backend is reachable. Setup and local-network requirements are documented in
+[`mobile/README.md`](mobile/README.md).
+
 ## Current capabilities
 
 - Hybrid LLM routing: Groq first, Ollama fallback, with optional complexity-aware and cost-aware policies.

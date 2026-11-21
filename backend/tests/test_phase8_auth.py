@@ -311,6 +311,42 @@ class Phase8AuthTestCase(unittest.IsolatedAsyncioTestCase):
             hashlib.sha256(body["csrf_token"].encode("utf-8")).hexdigest(),
         )
 
+    async def test_mobile_bearer_login_can_create_and_revoke_task_access(self):
+        setup = await self._setup_owner()
+        self.assertEqual(setup.status_code, 201, setup.text)
+
+        login = await self.client.post(
+            "/api/auth/mobile/login",
+            json={"username": OWNER_USERNAME, "password": OWNER_PASSWORD},
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+        body = login.json()
+        self.assertEqual(body["token_type"], "bearer")
+        self.assertTrue(body["access_token"])
+        self.assertNotIn("csrf_token", body)
+        self.assertIsNone(self._session_token())
+
+        headers = {"Authorization": f"Bearer {body['access_token']}"}
+        created = await self.client.post(
+            "/api/tasks/",
+            json={"title": "Mobile sync integration", "category": "other"},
+            headers=headers,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["user_id"], setup.json()["id"])
+
+        listed = await self.client.get("/api/tasks/", headers=headers)
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertIn(
+            created.json()["id"],
+            [task["id"] for task in listed.json()["tasks"]],
+        )
+
+        logout = await self.client.post("/api/auth/mobile/logout", headers=headers)
+        self.assertEqual(logout.status_code, 204, logout.text)
+        rejected = await self.client.get("/api/tasks/", headers=headers)
+        self.assertEqual(rejected.status_code, 401, rejected.text)
+
     async def test_invalid_login_is_rejected(self):
 
         await self._setup_owner()

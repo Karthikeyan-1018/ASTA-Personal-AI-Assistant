@@ -25,6 +25,7 @@ from app.exceptions.auth_exceptions import (
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
+    MobileLoginResponse,
     MeResponse,
     OwnerResponse,
     OwnerSetupRequest,
@@ -285,6 +286,68 @@ async def login(
     )
 
 
+@router.post("/mobile/login", response_model=MobileLoginResponse)
+async def mobile_login(
+    payload: LoginRequest,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_db),
+):
+    """Create a session for a native client using Authorization: Bearer."""
+
+    client_ip = resolve_client_ip(request)
+    account_key = normalize_account_key(payload.username)
+    decision = await login_rate_limit_service.check_allowed(
+        session,
+        ip_address=client_ip,
+        account_key=account_key,
+    )
+    if not decision.allowed:
+        raise _rate_limited(decision.retry_after_seconds)
+
+    owner = await auth_service.authenticate(
+        session=session,
+        username=payload.username,
+        password=payload.password,
+    )
+    if owner is None:
+        failure = await login_rate_limit_service.record_failure(
+            session,
+            ip_address=client_ip,
+            account_key=account_key,
+        )
+        if failure.locked:
+            raise _rate_limited(failure.retry_after_seconds)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password.",
+        )
+
+    user = await auth_service.get_owner_user(session, owner)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Owner account is misconfigured.",
+        )
+
+    raw_token, _csrf_token, auth_session = await auth_service.create_session(
+        session=session,
+        owner=owner,
+    )
+    await login_rate_limit_service.record_success(
+        session,
+        ip_address=client_ip,
+        account_key=account_key,
+    )
+
+    _no_store(response)
+    return MobileLoginResponse(
+        owner=_owner_response(owner, user),
+        expires_at=auth_session.expires_at,
+        access_token=raw_token,
+    )
+
+
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -313,6 +376,31 @@ async def logout(
     _no_store(response)
 
     logger.info("Owner logged out.")
+    return response
+
+
+@router.post(
+    "/mobile/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_csrf)],
+)
+async def mobile_logout(
+    request: Request,
+    session: AsyncSession = Depends(get_db),
+):
+    """Revoke a native client's bearer session."""
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, raw_token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not raw_token.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    await auth_service.revoke_session(session, raw_token.strip())
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    _no_store(response)
     return response
 
 

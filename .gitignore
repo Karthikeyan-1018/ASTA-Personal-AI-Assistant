@@ -40,3 +40,8 @@ build/
 data/raw/
 data/processed/
 data/embeddings/
+# Local HTTPS keys and certificates for trusted LAN use
+/certs/
+
+# Device-specific local CA certificate for ASTA LAN HTTPS
+mobile/asta-home-ca.crt

@@ -3,8 +3,8 @@
 Phase 8 adds a single-owner authentication boundary and documents how to reach
 ASTA safely from a laptop and a phone on a trusted private network.
 
-ASTA still has **no frontend**. This document describes the backend contract a
-future frontend must follow.
+This document describes the authentication contract used by ASTA's web and
+native clients.
 
 ## Architecture summary
 
@@ -12,10 +12,14 @@ future frontend must follow.
 - Passwords hashed with **Argon2id**; plaintext and hashes are never returned.
 - Server-side sessions stored in `auth_sessions`; only SHA-256 hashes of the
   random session token and CSRF token are persisted.
-- Opaque session cookie, **not JWT**. This avoids refresh-token complexity and
-  makes logout immediately revocable.
-- Every business router derives identity from the session cookie only. A
-  `user_id` in a body, query string, or header is never trusted.
+- Opaque server-side sessions, **not JWTs**. Browsers use an HttpOnly cookie;
+  native clients use a bearer credential. Both can be revoked immediately.
+- Native clients may use the dedicated `/api/auth/mobile/login` route. It
+  returns the same opaque server-side session token as a bearer credential;
+  native clients must store it in platform secure storage and use
+  `/api/auth/mobile/logout` to revoke it.
+- Every business router derives identity from a validated server-side session.
+  A `user_id` in a body, query string, or header is never trusted.
 - Health endpoints remain public because they expose no sensitive data.
 
 ## Dependencies
@@ -121,6 +125,14 @@ X-CSRF-Token: <csrf token>
 
 Revokes the session row, clears both cookies, and returns `204`. A replayed
 session cookie is rejected afterwards.
+
+Native clients sign in with the same username and password at
+`POST /api/auth/mobile/login`. The response includes `access_token`,
+`token_type: "bearer"`, the owner, and session expiry. Send the token as
+`Authorization: Bearer <access_token>` on protected API requests. Store it in
+OS-backed secure storage, never in ordinary preferences or logs. Revoke it
+with `POST /api/auth/mobile/logout`; sessions also expire according to
+`AUTH_SESSION_LIFETIME_HOURS`.
 
 ## Session lifecycle
 

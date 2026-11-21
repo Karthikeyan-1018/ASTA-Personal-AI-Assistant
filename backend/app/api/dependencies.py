@@ -1,8 +1,7 @@
 """Authentication dependencies for protected ASTA routes.
 
-User identity is derived exclusively from the server-side session referenced by
-the HttpOnly session cookie. A user id is never accepted from a request body,
-query string, or header.
+Browser requests use the session cookie; native clients use a bearer session
+token. A user id is never accepted from request data.
 """
 
 from __future__ import annotations
@@ -22,6 +21,18 @@ def _session_cookie(request: Request) -> str | None:
     return request.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
 
 
+def _session_token(request: Request) -> str | None:
+    cookie = _session_cookie(request)
+    if cookie:
+        return cookie
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, credential = authorization.partition(" ")
+    if scheme.lower() == "bearer" and credential.strip():
+        return credential.strip()
+    return None
+
+
 async def _validated_session(
     request: Request,
     session: AsyncSession,
@@ -30,7 +41,7 @@ async def _validated_session(
 ):
     auth_session = await auth_service.get_session_by_token(
         session,
-        _session_cookie(request),
+        _session_token(request),
     )
 
     if auth_session is None:

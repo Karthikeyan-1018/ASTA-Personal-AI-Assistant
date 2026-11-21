@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "ASTA Mobile",
+    "slug": "asta-mobile",
+    "scheme": "asta",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.asta.mobile"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "47da32d6-da6f-4ac4-847a-0b3ccd1704de"
+      }
+    }
+  }
+}

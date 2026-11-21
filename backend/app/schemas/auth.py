@@ -33,6 +33,15 @@ class LoginResponse(BaseModel):
     csrf_token: str
 
 
+class MobileLoginResponse(BaseModel):
+    """A revocable bearer session for a native client to store securely."""
+
+    owner: OwnerResponse
+    expires_at: datetime
+    access_token: str
+    token_type: str = "bearer"
+
+
 class MeResponse(BaseModel):
     owner: OwnerResponse
     session_expires_at: datetime
